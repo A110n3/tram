@@ -1,0 +1,3 @@
+# 统一行尾：源码用 LF，批处理用 CRLF（兼容 cmd）
+* text=auto eol=lf
+*.bat text eol=crlf

@@ -1,7 +1,15 @@
 """全局热键监听（Windows）。
 
-用 Win32 RegisterHotKey 注册系统级热键，在监听线程的消息队列上接收
-WM_HOTKEY。本模块只负责监听并 emit 信号；真正的取词动作在主线程槽中
+用 Win32 RegisterHotKey 注册系统级热键，消息循环使用
+MsgWaitForMultipleObjects 同时等待 Windows 消息和停止事件，
+避免 PostThreadMessageW(WM_QUIT) 在线程消息队列尚未创建时的
+竞态丢失。
+
+Win32 调用统一使用 pywin32（win32gui/win32event）。注意
+RegisterHotKey 失败时 pywin32 抛出 pywintypes.error（而非返回
+FALSE），错误码在 e.winerror。
+
+本模块只负责监听并 emit 信号；真正的取词动作在主线程槽中
 执行（QClipboard 必须在主线程访问）。
 
 parse_hotkey 为纯逻辑，不依赖 Win32，可单独单测。
@@ -9,10 +17,14 @@ parse_hotkey 为纯逻辑，不依赖 Win32，可单独单测。
 
 from __future__ import annotations
 
-import ctypes
-from ctypes import wintypes
+import logging
 
+import pywintypes
+import win32event
+import win32gui
 from PyQt6.QtCore import QThread, pyqtSignal
+
+logger = logging.getLogger(__name__)
 
 # Win32 消息常量
 WM_HOTKEY = 0x0312
@@ -52,7 +64,7 @@ def parse_hotkey(spec: str) -> tuple[int, int]:
     """解析热键字符串，返回 (modifiers, vk)。
 
     例:
-        "Ctrl+Shift+T" -> (MOD_CONTROL | MOD_SHIFT, 0x54)
+        "Ctrl+F4"     -> (MOD_CONTROL, 0x73)
         "Alt+Q"        -> (MOD_ALT, 0x51)
         "Ctrl+F1"      -> (MOD_CONTROL, 0x70)
 
@@ -64,7 +76,7 @@ def parse_hotkey(spec: str) -> tuple[int, int]:
     if not parts:
         raise HotkeyError("热键不能为空")
     if len(parts) < 2:
-        raise HotkeyError("热键需至少含一个修饰键与一个按键，如 Ctrl+Shift+T")
+        raise HotkeyError("热键需至少含一个修饰键与一个按键，如 Ctrl+F4")
 
     *mods, key = parts
     modifiers = 0
@@ -87,7 +99,12 @@ def parse_hotkey(spec: str) -> tuple[int, int]:
 
 
 class GlobalHotkeyThread(QThread):
-    """在独立线程注册并监听全局热键，触发时 emit triggered。"""
+    """在独立线程注册并监听全局热键，触发时 emit triggered。
+
+    使用 Win32 Event 作为停止信号，通过 MsgWaitForMultipleObjects
+    在消息循环中同时等待消息和停止事件，从根本上避免
+    PostThreadMessageW(WM_QUIT) 在线程消息队列创建前的竞态丢失。
+    """
 
     triggered = pyqtSignal()
     registration_ok = pyqtSignal()
@@ -97,7 +114,12 @@ class GlobalHotkeyThread(QThread):
         super().__init__(parent)
         self._spec = spec
         self._id = hotkey_id
-        self._thread_id: int = 0
+        # 在主线程创建停止事件（manual-reset, initially non-signaled）
+        try:
+            self._stop_event = win32event.CreateEvent(None, True, False, None)
+        except pywintypes.error:
+            logger.error("CreateEvent 失败，停止机制将不可用", exc_info=True)
+            self._stop_event = None
 
     def run(self) -> None:
         try:
@@ -106,47 +128,77 @@ class GlobalHotkeyThread(QThread):
             self.registration_failed.emit(str(e))
             return
 
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        user32.RegisterHotKey.argtypes = [
-            wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT
-        ]
-        user32.RegisterHotKey.restype = wintypes.BOOL
-        user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.UnregisterHotKey.restype = wintypes.BOOL
-        user32.GetMessageW.argtypes = [
-            ctypes.POINTER(wintypes.MSG), wintypes.HWND,
-            wintypes.UINT, wintypes.UINT,
-        ]
-        user32.GetMessageW.restype = wintypes.BOOL
-        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
-
-        self._thread_id = kernel32.GetCurrentThreadId()
-
-        if not user32.RegisterHotKey(None, self._id, modifiers, vk):
+        try:
+            win32gui.RegisterHotKey(None, self._id, modifiers, vk)
+        except pywintypes.error as e:
             self.registration_failed.emit(
-                f"热键 {self._spec} 注册失败，可能已被其他程序占用，请在设置中更换。"
+                f"热键 {self._spec} 注册失败: {e.strerror} (0x{e.winerror:08X})"
             )
             return
         self.registration_ok.emit()
 
-        msg = wintypes.MSG()
+        handles = [self._stop_event] if self._stop_event else []
         try:
-            # GetMessageW: >0 正常消息，0=WM_QUIT，-1=错误
-            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-                if msg.message == WM_HOTKEY and msg.wParam == self._id:
-                    self.triggered.emit()
+            while True:
+                # 同时等待：停止事件（索引 0）或任意 Windows 消息
+                result = win32event.MsgWaitForMultipleObjects(
+                    handles, False, win32event.INFINITE, win32event.QS_ALLINPUT
+                )
+                if handles and result == win32event.WAIT_OBJECT_0:
+                    break  # 停止事件
+                # 排空消息队列
+                while True:
+                    found, msg = win32gui.PeekMessage(None, 0, 0, 1)  # PM_REMOVE
+                    if not found:
+                        break
+                    _hwnd, message, wparam, _lparam, _time, _pt = msg
+                    if message == WM_HOTKEY and wparam == self._id:
+                        self.triggered.emit()
+                    elif message == WM_QUIT:
+                        return  # 外部 WM_QUIT，直接退出
         finally:
-            user32.UnregisterHotKey(None, self._id)
+            try:
+                win32gui.UnregisterHotKey(None, self._id)
+            except Exception:
+                logger.debug("UnregisterHotKey 异常", exc_info=True)
 
     def request_quit(self) -> None:
-        """从主线程唤醒阻塞的 GetMessage，使监听线程退出。"""
-        tid = self._thread_id
-        if not tid:
-            return
-        user32 = ctypes.windll.user32
-        user32.PostThreadMessageW.argtypes = [
-            wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
-        ]
-        user32.PostThreadMessageW.restype = wintypes.BOOL
-        user32.PostThreadMessageW(tid, WM_QUIT, 0, 0)
+        """从主线程触发停止事件，唤醒 MsgWaitForMultipleObjects。"""
+        if self._stop_event:
+            win32event.SetEvent(self._stop_event)
+
+
+def test_hotkey_available(spec: str, timeout_ms: float = 300) -> tuple[bool, str]:
+    """在临时线程上尝试注册热键，检测是否可注册（未被占用）。
+
+    返回 (True, "") 或 (False, 错误消息)。
+    注册成功后立即释放，不干扰实际热键监听。
+    """
+    import threading as _threading
+
+    try:
+        modifiers, vk = parse_hotkey(spec)
+    except HotkeyError as e:
+        return False, str(e)
+
+    result: dict = {"ok": False, "error": ""}
+
+    def _tester() -> None:
+        TEST_ID = 0xBFFF  # 独立 ID，避免与主监听线程冲突
+        try:
+            win32gui.RegisterHotKey(None, TEST_ID, modifiers, vk)
+            result["ok"] = True
+            win32gui.UnregisterHotKey(None, TEST_ID)
+        except pywintypes.error as e:
+            result["error"] = (
+                f"热键 {spec} 注册失败 (0x{e.winerror:08X})，请更换其他组合键"
+            )
+        except Exception:
+            logger.debug("热键测试异常", exc_info=True)
+            result["error"] = f"热键 {spec} 注册失败，请更换其他组合键"
+
+    t = _threading.Thread(target=_tester, daemon=True)
+    t.start()
+    t.join(timeout_ms / 1000.0)
+
+    return result["ok"], result["error"]

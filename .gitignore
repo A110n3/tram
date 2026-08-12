@@ -13,12 +13,22 @@ env/
 # Claude 本地设置（本机权限等，不提交）
 .claude/settings.local.json
 
-# 打包产物
+# 打包产物（tram.spec 为打包配置，需提交）
 build/
 dist/
-*.spec
 
 # 系统文件
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# 会话/临时记录
+conversation-*.txt
+
+# 工具缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Claude 会话计划文件
+.claude/plans/

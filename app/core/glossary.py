@@ -2,14 +2,17 @@
 
 术语表以 JSON 保存在 ~/.tram/glossary.json，
 每条记录 {source: 原文, target: 译文}，翻译时注入提示词强制遵循。
+写入采用原子替换，读取对损坏/畸形数据有防御。
 """
 
 from __future__ import annotations
 
 import json
-import os
+import logging
 
-from ..config import GLOSSARY_FILE
+from ..config import GLOSSARY_FILE, save_glossary_json
+
+logger = logging.getLogger(__name__)
 
 Entry = dict  # {"source": str, "target": str}
 
@@ -19,21 +22,35 @@ def ensure_file() -> None:
 
 
 def load_glossary() -> list[Entry]:
+    """读取术语表，对损坏/非 dict 元素有防御。
+
+    - JSON 解析失败：返回空列表
+    - 元素非 dict：跳过（不崩溃）
+    - source/target 为空：跳过
+    """
     try:
         if GLOSSARY_FILE.exists():
-            with open(GLOSSARY_FILE, "r", encoding="utf-8") as f:
+            with open(GLOSSARY_FILE, encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list):
-                return [e for e in data if e.get("source") and e.get("target")]
-    except (json.JSONDecodeError, OSError):
-        pass
+                result: list[Entry] = []
+                for e in data:
+                    if not isinstance(e, dict):
+                        logger.warning("术语表跳过非 dict 条目: %r", e)
+                        continue
+                    src = e.get("source")
+                    tgt = e.get("target")
+                    if src and tgt:
+                        result.append({"source": src, "target": tgt})
+                return result
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("术语表读取失败，回退为空: %s", e)
     return []
 
 
 def save_glossary(entries: list[Entry]) -> None:
-    ensure_file()
-    with open(GLOSSARY_FILE, "w", encoding="utf-8") as f:
-        json.dump(entries, f, ensure_ascii=False, indent=2)
+    """原子写入术语表。"""
+    save_glossary_json(entries)
 
 
 def to_prompt_block(entries: list[Entry]) -> str:

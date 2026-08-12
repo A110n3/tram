@@ -103,21 +103,21 @@ def test_translate_chunk_clears_partial_tokens_on_retry():
 
 
 def test_parse_hotkey_ctrl_shift_t():
-    from app.core.hotkey import parse_hotkey, HotkeyError, MOD_CONTROL, MOD_SHIFT
+    from app.core.hotkey import MOD_CONTROL, MOD_SHIFT, parse_hotkey
     mods, vk = parse_hotkey("Ctrl+Shift+T")
     assert mods == (MOD_CONTROL | MOD_SHIFT)
     assert vk == 0x54  # 'T'
 
 
 def test_parse_hotkey_alt_q():
-    from app.core.hotkey import parse_hotkey, MOD_ALT
+    from app.core.hotkey import MOD_ALT, parse_hotkey
     mods, vk = parse_hotkey("Alt+Q")
     assert mods == MOD_ALT
     assert vk == 0x51  # 'Q'
 
 
 def test_parse_hotkey_no_mod():
-    from app.core.hotkey import parse_hotkey, HotkeyError
+    from app.core.hotkey import HotkeyError, parse_hotkey
     try:
         parse_hotkey("T")
         assert False, "应抛 HotkeyError"
@@ -126,7 +126,7 @@ def test_parse_hotkey_no_mod():
 
 
 def test_parse_hotkey_invalid_mod():
-    from app.core.hotkey import parse_hotkey, HotkeyError
+    from app.core.hotkey import HotkeyError, parse_hotkey
     try:
         parse_hotkey("Super+T")
         assert False, "应抛 HotkeyError"

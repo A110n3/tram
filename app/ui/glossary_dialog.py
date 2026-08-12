@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -30,9 +29,9 @@ class GlossaryDialog(QDialog):
 
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["原文 (Source)", "译文 (Target)"])
-        self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
-        )
+        header = self.table.horizontalHeader()
+        if header is not None:
+            header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
 
         btn_row = QHBoxLayout()
@@ -75,8 +74,10 @@ class GlossaryDialog(QDialog):
     def _collect(self) -> list[dict]:
         entries = []
         for r in range(self.table.rowCount()):
-            src = (self.table.item(r, 0).text() if self.table.item(r, 0) else "").strip()
-            dst = (self.table.item(r, 1).text() if self.table.item(r, 1) else "").strip()
+            src_item = self.table.item(r, 0)
+            dst_item = self.table.item(r, 1)
+            src = src_item.text().strip() if src_item else ""
+            dst = dst_item.text().strip() if dst_item else ""
             if src and dst:
                 entries.append({"source": src, "target": dst})
         return entries

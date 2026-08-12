@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
     QMainWindow,
     QMenu,
-    QMessageBox,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -17,8 +18,8 @@ from PyQt6.QtWidgets import (
 
 from ..config import save_config
 from .glossary_dialog import GlossaryDialog
-from .settings_dialog import SettingsDialog
 from .selection_translator import SelectionTranslator
+from .settings_dialog import SettingsDialog
 
 
 class MainWindow(QMainWindow):
@@ -43,10 +44,23 @@ class MainWindow(QMainWindow):
         self.hide()
 
     # ---------- UI ----------
+    @staticmethod
+    def _act(action: QAction | None, slot: Callable[[], None]) -> QAction:
+        """QMenu.addAction 的类型签名为 QAction | None，实际总是成功。
+
+        统一断言收窄类型并连接 triggered 信号，避免到处写 assert。
+        """
+        assert action is not None
+        action.triggered.connect(slot)
+        return action
+
     def _build_ui(self) -> None:
-        tools_menu = self.menuBar().addMenu("工具")
-        tools_menu.addAction("设置…").triggered.connect(self.open_settings)
-        tools_menu.addAction("术语表…").triggered.connect(self.open_glossary)
+        menubar = self.menuBar()
+        assert menubar is not None  # QMainWindow.menuBar() 总是存在
+        tools_menu = menubar.addMenu("工具")
+        assert tools_menu is not None
+        self._act(tools_menu.addAction("设置…"), self.open_settings)
+        self._act(tools_menu.addAction("术语表…"), self.open_glossary)
 
         central = QWidget()
         lay = QVBoxLayout(central)
@@ -74,17 +88,15 @@ class MainWindow(QMainWindow):
         self._tray_icon.setToolTip("Tram 划词翻译")
 
         menu = QMenu()
-        show_action = menu.addAction("显示主窗口")
-        show_action.triggered.connect(self._show_from_tray)
+        self._act(menu.addAction("显示主窗口"), self._show_from_tray)
         menu.addSeparator()
-        self._selection_action = menu.addAction("划词翻译")
+        self._selection_action = self._act(menu.addAction("划词翻译"), self._toggle_selection)
         self._selection_action.setCheckable(True)
-        self._selection_action.triggered.connect(self._toggle_selection)
         menu.addSeparator()
-        menu.addAction("设置…").triggered.connect(self.open_settings)
-        menu.addAction("术语表…").triggered.connect(self.open_glossary)
+        self._act(menu.addAction("设置…"), self.open_settings)
+        self._act(menu.addAction("术语表…"), self.open_glossary)
         menu.addSeparator()
-        menu.addAction("退出").triggered.connect(self.quit_app)
+        self._act(menu.addAction("退出"), self.quit_app)
 
         self._tray_icon.setContextMenu(menu)
         self._tray_icon.show()
@@ -129,7 +141,7 @@ class MainWindow(QMainWindow):
             self._selection_translator.start()
             self._tray_icon.showMessage(
                 "Tram 划词",
-                f"划词翻译已开启，热键: {sel.get('hotkey', 'Ctrl+Shift+T')}",
+                f"划词翻译已开启，热键: {sel.get('hotkey', 'Ctrl+F4')}",
                 QSystemTrayIcon.MessageIcon.Information,
                 4000,
             )
@@ -158,10 +170,10 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self._config, self)
         if dlg.exec():
             save_config(self._config)
+            # 重建后端（切换模型时生效），并重新注册热键
             self._selection_translator.rebuild_backend()
-            self._selection_action.setChecked(
-                self._config.get("selection", {}).get("enabled", False)
-            )
+            # 同步托盘菜单勾选状态与 tooltip
+            self._apply_selection_config()
 
     def open_glossary(self) -> None:
         from ..core import glossary as gs
@@ -174,7 +186,9 @@ class MainWindow(QMainWindow):
     def quit_app(self) -> None:
         self._quitting = True
         self._selection_translator.shutdown()
-        QApplication.instance().quit()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def closeEvent(self, event) -> None:
         if self._quitting:

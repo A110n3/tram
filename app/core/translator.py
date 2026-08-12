@@ -2,17 +2,33 @@
 
 流程：分段 -> 逐块构造带上下文/术语表的提示词 -> 流式调用后端。
 支持 on_token（增量文本）与 on_chunk 回调，供 GUI 流式显示。
+单块翻译失败自动重试，但对永久性错误（4xx）立即失败。
 """
 
 from __future__ import annotations
 
+import logging
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from .backend import BackendError, OpenAIBackend
 from .chunking import split_text
 from .glossary import to_prompt_block
 from .prompts import build_messages
+
+logger = logging.getLogger(__name__)
+
+# 4xx 状态码视为永久错误，不重试
+_PERMANENT_STATUS_RANGE = (400, 500)
+_MAX_RETRIES = 3
+
+
+def _is_retryable(err: Exception) -> bool:
+    """判断错误是否值得重试（瞬态错误）。"""
+    if isinstance(err, BackendError) and err.status_code is not None:
+        return err.status_code not in _PERMANENT_STATUS_RANGE
+    # 网络超时等无状态码错误可重试
+    return True
 
 
 class Translator:
@@ -23,9 +39,9 @@ class Translator:
     def translate(
         self,
         text: str,
-        on_token: Optional[Callable[[str], None]] = None,
-        on_chunk: Optional[Callable[[int, int], None]] = None,
-        on_retry: Optional[Callable[[], None]] = None,
+        on_token: Callable[[str], None] | None = None,
+        on_chunk: Callable[[int, int], None] | None = None,
+        on_retry: Callable[[], None] | None = None,
     ) -> str:
         """翻译整段文本，返回完整译文。
 
@@ -38,14 +54,12 @@ class Translator:
         style = tcfg.get("style", "忠实原文")
         chunk_chars = tcfg.get("chunk_chars", 2000)
 
-        glossary_block = to_prompt_block(
-            self.config.get("glossary", [])
-        )
+        glossary_block = to_prompt_block(self.config.get("glossary", []))
         chunks = split_text(text, chunk_chars)
         total = len(chunks)
 
         full_result: list[str] = []
-        prev_chunk: Optional[str] = None  # 前一块原文，用于上下文
+        prev_chunk: str | None = None  # 前一块原文，用于上下文
 
         for index, chunk in enumerate(chunks):
             if on_chunk:
@@ -78,18 +92,17 @@ class Translator:
         self,
         messages: list[dict],
         on_token,
-        on_retry: Optional[Callable[[], None]] = None,
+        on_retry: Callable[[], None] | None = None,
     ) -> str:
         """翻译单块，失败自动重试（最多 3 次，指数退避）。
 
-        重试前调用 on_retry（若有），让 UI 回滚该块已显示的内容，
-        并清空已收集的 token，避免重复累积。
+        永久性错误（4xx）立即失败，不重试。
         """
         bcfg = self.config.get("backend", {})
         temperature = bcfg.get("temperature", 0.2)
         max_tokens = bcfg.get("max_tokens", 2048)
 
-        last_err: Optional[Exception] = None
+        last_err: Exception | None = None
         collected: list[str] = []
 
         def _on_token(t: str) -> None:
@@ -97,13 +110,14 @@ class Translator:
             if on_token:
                 on_token(t)
 
-        for attempt in range(3):
+        for attempt in range(_MAX_RETRIES):
             if attempt > 0:
-                # 重试：回滚 UI 已显示的本块内容，清空收集结果
                 if on_retry:
                     on_retry()
                 collected.clear()
-                time.sleep(1.5 * attempt)  # 退避：1.5s / 3.0s
+                delay = 1.5 * attempt  # 退避：1.5s / 3.0s
+                logger.info("翻译重试 #%d，等待 %.1fs", attempt, delay)
+                time.sleep(delay)
             try:
                 self.backend.chat_stream(
                     messages,
@@ -114,4 +128,9 @@ class Translator:
                 return "".join(collected).strip()
             except BackendError as e:
                 last_err = e
+                if not _is_retryable(e):
+                    logger.warning("翻译永久错误，不重试: %s", e)
+                    raise
+                logger.warning("翻译失败 (attempt %d/%d): %s",
+                               attempt + 1, _MAX_RETRIES, e)
         raise last_err or BackendError("翻译失败")

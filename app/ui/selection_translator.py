@@ -9,15 +9,21 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
+from collections.abc import Callable
+from typing import Any, cast
+
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ..config import save_config
 from ..core.backend import OpenAIBackend
 from ..core.hotkey import GlobalHotkeyThread
 from ..core.selection import grab_selection
 from ..core.translator import Translator
 from .popup import TranslationPopup
 from .worker import TranslateWorker
+
+logger = logging.getLogger(__name__)
 
 
 class SelectionTranslator(QObject):
@@ -53,59 +59,100 @@ class SelectionTranslator(QObject):
         try:
             self._backend.close()
         except Exception:
-            pass
+            logger.debug("关闭 backend 异常", exc_info=True)
 
     # ---------- 开关 ----------
     def start(self) -> None:
-        """注册全局热键，开启划词模式。"""
+        """注册全局热键，开启划词模式。
+
+        先确保旧的监听线程已停止并从所有信号断开，避免信号连接累积
+        导致后续线程触发的槽重复执行或状态错乱。
+        """
         sel_cfg = self._config.get("selection", {})
         if not sel_cfg.get("enabled", False):
             return
 
-        self.stop()
+        self._detach_hotkey_thread()
+        # 旧线程未能在 1s 内退出则放弃本次注册，避免线程堆积
+        if self._hotkey_thread is not None:
+            return
 
-        hotkey = sel_cfg.get("hotkey", "Ctrl+Shift+T")
+        hotkey = sel_cfg.get("hotkey", "Ctrl+F4")
         self._hotkey_thread = GlobalHotkeyThread(hotkey)
         self._hotkey_thread.triggered.connect(self._on_hotkey)
         self._hotkey_thread.registration_ok.connect(self._on_registration_ok)
         self._hotkey_thread.registration_failed.connect(self._on_registration_failed)
         self._hotkey_thread.start()
 
+    def _detach_hotkey_thread(self) -> None:
+        """停止并断开当前热键线程的所有信号连接。
+
+        先发停止信号、再等待线程退出、最后才清理引用。
+        """
+        if not self._hotkey_thread:
+            return
+        ht = self._hotkey_thread
+        # 1. 断开信号（阻止旧线程的延迟 emission 触发槽）
+        for sig, slot in [
+            (ht.triggered, self._on_hotkey),
+            (ht.registration_ok, self._on_registration_ok),
+            (ht.registration_failed, self._on_registration_failed),
+        ]:
+            with contextlib.suppress(TypeError, RuntimeError):
+                sig.disconnect(cast("Callable[..., Any]", slot))
+        # 2. 发送停止信号
+        ht.request_quit()
+        # 3. 等待线程退出
+        if ht.wait(1000):
+            self._hotkey_thread = None
+
     def stop(self) -> None:
         """注销热键，取消当前翻译。"""
         self._cancel_worker()
-        if self._hotkey_thread:
-            ht = self._hotkey_thread
-            self._hotkey_thread = None
-            ht.request_quit()
-            ht.wait(1000)
+        self._detach_hotkey_thread()
 
     def _on_registration_failed(self, msg: str) -> None:
         self.hotkey_status.emit(False, msg)
 
     def _on_registration_ok(self) -> None:
-        self.hotkey_status.emit(True, f"热键已就绪")
+        self.hotkey_status.emit(True, "热键已就绪")
 
     # ---------- 热键处理 ----------
     def _on_hotkey(self) -> None:
+        # 1. 清理旧 popup 和进行中的 worker
+        self._cancel_worker()
+        if self._popup:
+            self._popup.hide()
+            self._popup = None
+
+        sel_cfg = self._config.get("selection", {})
+        auto_hide = sel_cfg.get("auto_hide_ms", 0)
+        self._popup = TranslationPopup(auto_hide_ms=auto_hide)
+        # 先以极简窗告知"正在捕获"，定位在鼠标旁
+        self._popup.show_capturing()
+
+        # 2. 取词（可能阻塞最多 400ms，但用户已看到反馈）
         text = grab_selection()
         if not text or not text.strip():
+            if self._popup:
+                self._popup.fade_out()
             return
 
         stripped = text.strip()
-        sel_cfg = self._config.get("selection", {})
         min_chars = sel_cfg.get("min_chars", 2)
         if len(stripped) < min_chars:
+            if self._popup:
+                self._popup.hide()
             return
         if stripped == self._last_text:
+            if self._popup:
+                self._popup.hide()
             return
         self._last_text = stripped
 
-        self._cancel_worker()
-
-        auto_hide = sel_cfg.get("auto_hide_ms", 0)
-        self._popup = TranslationPopup(auto_hide_ms=auto_hide)
-        self._popup.show_loading(stripped)
+        # 3. 取词成功，更新为原文 + 翻译中
+        if self._popup:
+            self._popup.show_loading(stripped)
 
         translator = Translator(self._backend, self._config)
         self._worker = TranslateWorker(translator, stripped)
@@ -116,9 +163,10 @@ class SelectionTranslator(QObject):
         self._worker.start()
 
     def _cancel_worker(self) -> None:
-        """取消进行中的翻译并断开所有信号。"""
+        """取消进行中的翻译，等待线程退出，断开所有信号。"""
         if self._worker:
             self._worker.request_stop()
+            self._worker.wait(2000)  # 等待线程退出，避免资源泄漏
             try:
                 self._worker.token.disconnect()
                 self._worker.succeeded.disconnect()
@@ -144,7 +192,7 @@ class SelectionTranslator(QObject):
     # ---------- 切换模型 ----------
     def rebuild_backend(self) -> None:
         """切换模型后重建后端并重新注册热键。"""
-        self.stop()
+        self.stop()  # stop 内含 _cancel_worker(等待) + _detach_hotkey_thread
         self._close_backend()
         self._backend = self._make_backend()
         self.start()

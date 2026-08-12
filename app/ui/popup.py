@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, Qt, QTimer, QPoint
+from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer
 from PyQt6.QtGui import QCursor, QGuiApplication
 from PyQt6.QtWidgets import (
     QFrame,
@@ -46,8 +46,10 @@ class TranslationPopup(QFrame):
 
     def _build_ui(self) -> None:
         self.setFixedWidth(POPUP_WIDTH)
-        self.setMaximumHeight(POPUP_MAX_HEIGHT)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Maximum)
+        # 高度完全由 _adjust_height 通过 setFixedHeight 控制，
+        # 不在构造时预设 setMaximumHeight / controversial size policy，
+        # 避免与 setFixedHeight 产生 MINMAXINFO 约束冲突。
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         # 标题栏：原文 + 关闭按钮
         header = QHBoxLayout()
@@ -130,6 +132,37 @@ class TranslationPopup(QFrame):
         self._adjust_height()
         self._show()
 
+    def show_capturing(self) -> None:
+        """热键触发后立即展示最小窗口，提示"正在捕获"。
+
+        关键：不调用 activateWindow()/setFocus()，否则弹窗抢走焦点
+        会导致后续 SendInput(Ctrl+C) 发到弹窗而非用户选中文本的窗口。
+        调用 processEvents 强制刷新一次，确保窗口在 grab_selection
+        阻塞主线程前已经渲染。
+        """
+        from PyQt6.QtWidgets import QApplication
+
+        self._source_label.setVisible(False)
+        self._target_label.setStyleSheet("")  # 清除错误样式
+        self._target_label.setText("正在捕获…")
+        self._adjust_height()
+        self._position_at_cursor()
+        self.show()
+        # 仅提升 Z 序，不抢焦点
+        self.raise_()
+        # 强制刷新一次 UI，让"正在捕获"在 grab_selection 阻塞前渲染
+        QApplication.processEvents()
+
+    def fade_out(self) -> None:
+        """捕获失败时短暂提示后自动隐藏。"""
+        self._target_label.setText("未检测到选中文本")
+        self._target_label.setStyleSheet("color: #9aa0ac;")
+        self._adjust_height()
+        self._position_at_cursor()
+        self.show()
+        self.raise_()
+        QTimer.singleShot(800, self.hide)
+
     # ---------- 显示/隐藏 ----------
     def _show(self) -> None:
         self._adjust_height()
@@ -144,19 +177,28 @@ class TranslationPopup(QFrame):
             self._timer.stop()
 
     def _adjust_height(self) -> None:
-        avail_w = POPUP_WIDTH - 2 * POPUP_MARGIN
+        # QLabel heightForWidth 在未 show 时可能不准确，先确保 widget 已创建
+        avail_w = POPUP_WIDTH - 2 * POPUP_MARGIN  # = 356
         src_h = (
             self._source_label.heightForWidth(avail_w)
             if self._source_label.isVisible() and self._source_label.text()
             else 0
         )
         tgt_h = self._target_label.heightForWidth(avail_w)
-        total = src_h + tgt_h + 32  # margin + spacing + header
-        self.setFixedHeight(min(max(total, 52), POPUP_MAX_HEIGHT))
+        if tgt_h < 18:
+            tgt_h = 18  # 单行最小高度，避免空内容时窗口坍缩
+
+        # Chrome: top margin(10) + bottom margin(12) + spacing(6)
+        # + header(close btn 20 + source label padding ≈ 26)
+        chrome = 54
+        total = src_h + tgt_h + chrome
+        self.setFixedHeight(min(max(total, 60), POPUP_MAX_HEIGHT))
 
     def _position_at_cursor(self) -> None:
         cursor = QCursor.pos()
         screen = QGuiApplication.screenAt(cursor) or QGuiApplication.primaryScreen()
+        if screen is None:  # 极端情况（无屏幕），跳过定位用默认位置
+            return
         geo = screen.availableGeometry()
         w = self.width()
         h = self.height()

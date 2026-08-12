@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
-    QGroupBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QKeySequenceEdit,
     QLabel,
@@ -22,9 +25,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from PyQt6.QtGui import QKeySequence
+from ..core.backend import BackendError, test_connection
+from ..core.hotkey import HotkeyError, parse_hotkey, test_hotkey_available
 
-from ..core.backend import BackendError, OpenAIBackend, test_connection
+logger = logging.getLogger(__name__)
 
 # 常用本地后端预设
 PRESETS = {
@@ -50,6 +54,9 @@ class _TestConnectionWorker(QThread):
             reply = test_connection(self._base_url, self._api_key, self._model)
             self.ok.emit(reply)
         except BackendError as e:
+            self.err.emit(str(e))
+        except Exception as e:
+            logger.warning("测试连接异常", exc_info=True)
             self.err.emit(str(e))
 
 
@@ -133,12 +140,18 @@ class SettingsDialog(QDialog):
 
         self.selection_enabled_cb = QCheckBox("启用划词翻译")
         self.selection_hotkey_edit = QKeySequenceEdit()
+        self.selection_hotkey_edit.keySequenceChanged.connect(
+            self._validate_hotkey
+        )
+        self._hotkey_validation = QLabel("")
+        self._hotkey_validation.setStyleSheet("color: #888; font-size: 11px;")
         self.selection_min_chars_spin = QSpinBox()
         self.selection_min_chars_spin.setRange(1, 50)
         self.selection_min_chars_spin.setSingleStep(1)
 
         sl.addRow("", self.selection_enabled_cb)
         sl.addRow("全局热键", self.selection_hotkey_edit)
+        sl.addRow("", self._hotkey_validation)
         sl.addRow("最小字符数", self.selection_min_chars_spin)
 
         layout.addWidget(sel_gb)
@@ -174,11 +187,13 @@ class SettingsDialog(QDialog):
         self.selection_enabled_cb.setChecked(sel.get("enabled", False))
         self.selection_hotkey_edit.setKeySequence(
             QKeySequence.fromString(
-                sel.get("hotkey", "Ctrl+Shift+T"),
+                sel.get("hotkey", "Ctrl+F4"),
                 QKeySequence.SequenceFormat.PortableText,
             )
         )
         self.selection_min_chars_spin.setValue(int(sel.get("min_chars", 2)))
+        # 初始校验当前热键
+        self._validate_hotkey(None)
 
     def _on_preset(self) -> None:
         url = self.preset_combo.currentData()
@@ -189,6 +204,34 @@ class SettingsDialog(QDialog):
         if not self.model_edit.text().strip():
             QMessageBox.warning(self, "提示", "请填写模型名称。")
             return
+
+        hotkey_spec = self.selection_hotkey_edit.keySequence().toString(
+            QKeySequence.SequenceFormat.PortableText
+        ) or "Ctrl+F4"
+
+        # 格式校验：先看 parse_hotkey 能不能解析
+        try:
+            parse_hotkey(hotkey_spec)
+        except HotkeyError as e:
+            self._hotkey_validation.setText(f"✗ {e}")
+            self._hotkey_validation.setStyleSheet(
+                "color: #c0392b; font-size: 11px;"
+            )
+            self.selection_hotkey_edit.setFocus()
+            return
+
+        # 只校验与当前已注册热键不同的新键；相同则跳过（必然可用）
+        current_hotkey = self._config.get("selection", {}).get("hotkey", "")
+        if hotkey_spec != current_hotkey:
+            ok, err = test_hotkey_available(hotkey_spec)
+            if not ok:
+                self._hotkey_validation.setText(f"✗ {err}")
+                self._hotkey_validation.setStyleSheet(
+                    "color: #c0392b; font-size: 11px;"
+                )
+                self.selection_hotkey_edit.setFocus()
+                return
+
         self._config["backend"].update(
             base_url=self.base_url_edit.text().strip(),
             api_key=self.api_key_edit.text().strip(),
@@ -202,13 +245,34 @@ class SettingsDialog(QDialog):
         )
         self._config.setdefault("selection", {}).update(
             enabled=self.selection_enabled_cb.isChecked(),
-            hotkey=self.selection_hotkey_edit.keySequence().toString(
-                QKeySequence.SequenceFormat.PortableText
-            ) or "Ctrl+Shift+T",
+            hotkey=hotkey_spec,
             min_chars=self.selection_min_chars_spin.value(),
             auto_hide_ms=self._config.get("selection", {}).get("auto_hide_ms", 0),
         )
         self.accept()
+
+    def _validate_hotkey(self, _seq: QKeySequence | None) -> None:
+        """实时校验热键是否可解析，给出即时反馈。"""
+        spec = self.selection_hotkey_edit.keySequence().toString(
+            QKeySequence.SequenceFormat.PortableText
+        )
+        if not spec:
+            self._hotkey_validation.setText("请输入全局热键，例如 Ctrl+F4")
+            self._hotkey_validation.setStyleSheet(
+                "color: #e67e22; font-size: 11px;"
+            )
+            return
+        try:
+            parse_hotkey(spec)
+            self._hotkey_validation.setText(f"✓ {spec}")
+            self._hotkey_validation.setStyleSheet(
+                "color: #27ae60; font-size: 11px;"
+            )
+        except HotkeyError as e:
+            self._hotkey_validation.setText(f"✗ {e}")
+            self._hotkey_validation.setStyleSheet(
+                "color: #c0392b; font-size: 11px;"
+            )
 
     def _on_test(self) -> None:
         url = self.base_url_edit.text().strip()
@@ -217,6 +281,10 @@ class SettingsDialog(QDialog):
             self.test_result.setText("请先填写 Base URL 和模型名称。")
             self.test_result.setStyleSheet("color: #c0392b;")
             return
+
+        # 清理旧 worker（等待退出 + deleteLater）
+        self._cleanup_test_worker()
+
         self.test_btn.setEnabled(False)
         self.test_result.setText("测试中…")
         self.test_result.setStyleSheet("color: #888;")
@@ -226,9 +294,9 @@ class SettingsDialog(QDialog):
         )
         self._test_worker.ok.connect(self._on_test_ok)
         self._test_worker.err.connect(self._on_test_err)
-        self._test_worker.finished.connect(
-            lambda: self.test_btn.setEnabled(True)
-        )
+        self._test_worker.finished.connect(self._on_test_finished)
+        # 线程结束后自动清理，避免 QThread destroyed while running
+        self._test_worker.finished.connect(self._test_worker.deleteLater)
         self._test_worker.start()
 
     def _on_test_ok(self, reply: str) -> None:
@@ -241,8 +309,27 @@ class SettingsDialog(QDialog):
         self.test_result.setText(f"❌ {message}")
         self.test_result.setStyleSheet("color: #c0392b;")
 
+    def _on_test_finished(self) -> None:
+        self.test_btn.setEnabled(True)
+
+    def _cleanup_test_worker(self) -> None:
+        """安全清理旧测试线程：等待退出 + 断开信号 + deleteLater。"""
+        w = self._test_worker
+        if w is None:
+            return
+        if w.isRunning() and not w.wait(3000):
+            logger.warning("测试连接线程 3s 未退出，放弃等待")
+        try:
+            w.ok.disconnect()
+            w.err.disconnect()
+            w.finished.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        # deleteLater 由 finished 信号触发；若线程已结束则立即调度
+        w.deleteLater()
+        self._test_worker = None
+
     def closeEvent(self, event) -> None:
-        # 等待测试线程结束，避免 QThread 析构时仍在运行
-        if self._test_worker and self._test_worker.isRunning():
-            self._test_worker.wait(2000)
+        # 安全清理测试线程，避免 QThread 析构时仍在运行
+        self._cleanup_test_worker()
         super().closeEvent(event)

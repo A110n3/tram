@@ -6,7 +6,7 @@
 
 ## 功能
 
-- **全局热键取词**：选中任意文本，按热键（默认 `Ctrl+Shift+T`），自动获取并翻译
+- **全局热键取词**：选中任意文本，按热键（默认 `Ctrl+F4`），自动获取并翻译
 - **流式悬浮窗**：译文边生成边显示，跟随鼠标，失焦自动隐藏，可拖动
 - **系统托盘常驻**：后台静默运行，关闭窗口自动最小化到托盘
 - **多后端切换**：Ollama / LM Studio / vLLM 等任意 OpenAI 兼容 API
@@ -24,6 +24,12 @@
 
 ## 安装与运行
 
+**方式一：exe 免安装**（推荐）
+
+从 [Releases](../../releases) 下载 `Tram.exe`，双击运行。
+
+**方式二：源码运行**
+
 ```bash
 pip install -r requirements.txt
 python -m app.main
@@ -31,21 +37,28 @@ python -m app.main
 
 首次运行请在托盘菜单中打开「设置」，选择后端预设并填写模型名称（如 `qwen2.5:7b`），点击「测试连接」确认可用。然后勾选「启用划词翻译」。
 
+运行日志位于 `~/.tram/tram.log`，反馈问题时请附带。
+
 ## 使用说明
 
 | 操作 | 方式 |
 |------|------|
 | 开启/关闭划词 | 右键托盘图标 → 划词翻译 |
-| 取词翻译 | 选中文本后按 `Ctrl+Shift+T`（可在设置中修改） |
+| 取词翻译 | 选中文本后按 `Ctrl+F4`（可在设置中修改） |
 | 关闭悬浮窗 | 点击 ✕ 或点击窗口外部 |
 | 拖动悬浮窗 | 按住任意空白区域拖动 |
 | 切换模型 | 托盘菜单 → 设置 |
 | 退出程序 | 托盘菜单 → 退出 |
 
-## 运行测试
+## 开发与测试
 
 ```bash
-python tests/test_core.py
+pip install pytest ruff mypy pyinstaller
+
+python -m pytest tests/ -q      # 运行测试
+python -m ruff check app/ tests/ # 代码检查
+python -m mypy app/              # 类型检查
+build.bat                        # 打包 dist/Tram.exe
 ```
 
 ## 项目结构
@@ -53,7 +66,8 @@ python tests/test_core.py
 ```
 app/
 ├── main.py                     # 入口
-├── config.py                   # 配置持久化 (~/.tram/config.json)
+├── config.py                   # 配置持久化 (~/.tram/config.json)，原子写入
+├── logging_config.py           # 日志 (~/.tram/tram.log)，滚动备份
 ├── core/
 │   ├── backend.py              # OpenAI 兼容流式客户端
 │   ├── chunking.py             # 长文本分段

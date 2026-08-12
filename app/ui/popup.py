@@ -1,8 +1,8 @@
 """划词翻译悬浮窗。
 
 无边框置顶小窗，跟随鼠标定位（多屏边界翻转），流式显示译文，
-失焦或超时后自动隐藏。译文区可选中复制。
-支持拖动（标题栏区域）和关闭按钮。
+失焦或超时后自动隐藏。译文区可选中复制，内容过长时滚动显示。
+支持拖动和关闭按钮。
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
 )
@@ -21,10 +22,12 @@ from PyQt6.QtWidgets import (
 POPUP_WIDTH = 380
 POPUP_MAX_HEIGHT = 360
 POPUP_MARGIN = 12
+# 高度计算时为滚动预留的宽度，保证滚动条出现时文本宽度不变、不重排
+_SCROLLBAR_RESERVE = 10
 
 
 class TranslationPopup(QFrame):
-    """无边框置顶悬浮窗，展示原文与流式译文。"""
+    """无边框置顶悬浮窗，流式展示译文，长内容滚动显示。"""
 
     def __init__(self, auto_hide_ms: int = 0, parent=None):
         super().__init__(
@@ -51,84 +54,107 @@ class TranslationPopup(QFrame):
         # 避免与 setFixedHeight 产生 MINMAXINFO 约束冲突。
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        # 标题栏：原文 + 关闭按钮
+        # 标题栏：仅关闭按钮，右对齐
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(4)
-
-        self._source_label = QLabel()
-        self._source_label.setWordWrap(True)
-        self._source_label.setProperty("role", "source")
-        self._source_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
+        header.setSpacing(0)
 
         close_btn = QPushButton("✕")  # ✕
         close_btn.setFixedSize(20, 20)
         close_btn.setFlat(True)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setStyleSheet(
-            "#TramClose { color: #788090; font-size: 13px; border: none; }"
-            " #TramClose:hover { color: #e8e8ec; }"
-        )
         close_btn.setObjectName("TramClose")
         close_btn.clicked.connect(self.hide)
 
-        header.addWidget(self._source_label)
-        header.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignTop)
+        header.addStretch()
+        header.addWidget(close_btn)
 
-        # 译文
+        # 译文：QLabel 放入 QScrollArea，内容过长时垂直滚动
         self._target_label = QLabel()
         self._target_label.setWordWrap(True)
         self._target_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
+        self._target_label.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
         self._target_label.setProperty("role", "target")
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidget(self._target_label)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        vbar = self._scroll.verticalScrollBar()
+        assert vbar is not None  # QScrollArea 垂直滚动条总是存在
+        self._vbar = vbar
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(POPUP_MARGIN, 10, POPUP_MARGIN, POPUP_MARGIN)
         lay.setSpacing(6)
         lay.addLayout(header)
-        lay.addWidget(self._target_label)
+        lay.addWidget(self._scroll)
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
             "#TramPopup { background: rgba(38, 42, 52, 240);"
             "  border: 1px solid rgba(255,255,255,40);"
             "  border-radius: 10px; }"
+            "#TramClose { color: #788090; font-size: 13px; border: none; }"
+            "#TramClose:hover { color: #e8e8ec; }"
             "QLabel { color: #e8e8ec; font-size: 13px; }"
-            'QLabel[role="source"] { color: #9aa0ac; font-size: 12px;'
-            "  border-bottom: 1px solid rgba(255,255,255,30); padding-bottom: 4px; }"
             'QLabel[role="target"] { color: #f5f6f8; font-size: 14px; }'
+            "QScrollArea { border: none; background: transparent; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+            # 细滚动条，透明轨道
+            "QScrollBar:vertical { background: transparent;"
+            "  width: 8px; margin: 2px 1px 2px 0; }"
+            "QScrollBar::handle:vertical { background: rgba(255,255,255,60);"
+            "  border-radius: 3px; min-height: 24px; }"
+            "QScrollBar::handle:vertical:hover { background: rgba(255,255,255,100); }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
+            "  background: transparent; }"
         )
 
     # ---------- 内容 ----------
-    def set_source(self, text: str) -> None:
-        snippet = text if len(text) <= 120 else text[:120] + "…"
-        self._source_label.setText(snippet)
-        self._source_label.setVisible(bool(text))
-
-    def show_loading(self, source: str = "") -> None:
+    def show_loading(self) -> None:
         self._target_label.setStyleSheet("")  # 清除错误样式
-        if source:
-            self.set_source(source)
         self._target_label.setText("翻译中…")
+        self._scroll_to_top()
         self._show()
 
     def append_token(self, token: str) -> None:
+        """流式追加译文。仅当用户未向上翻看时自动跟随到底部。"""
+        bar = self._vbar
+        stick_to_bottom = bar.value() >= bar.maximum() - 4
+
         cur = self._target_label.text()
         if cur == "翻译中…":
             cur = ""
         self._target_label.setText(cur + token)
         self._adjust_height()
+        if stick_to_bottom:
+            # 延迟到布局完成后滚动，确保滚动条 range 已按新内容更新
+            QTimer.singleShot(0, self._scroll_to_bottom)
 
     def set_translation(self, text: str) -> None:
+        bar = self._vbar
+        stick_to_bottom = bar.value() >= bar.maximum() - 4
         self._target_label.setText(text)
         self._adjust_height()
+        if stick_to_bottom:
+            QTimer.singleShot(0, self._scroll_to_bottom)
 
     def show_error(self, message: str) -> None:
         self._target_label.setText(f"❌ {message}")
         self._target_label.setStyleSheet("color: #e0a3a3;")
+        self._scroll_to_top()
         self._adjust_height()
         self._show()
 
@@ -142,9 +168,9 @@ class TranslationPopup(QFrame):
         """
         from PyQt6.QtWidgets import QApplication
 
-        self._source_label.setVisible(False)
         self._target_label.setStyleSheet("")  # 清除错误样式
         self._target_label.setText("正在捕获…")
+        self._scroll_to_top()
         self._adjust_height()
         self._position_at_cursor()
         self.show()
@@ -157,6 +183,7 @@ class TranslationPopup(QFrame):
         """捕获失败时短暂提示后自动隐藏。"""
         self._target_label.setText("未检测到选中文本")
         self._target_label.setStyleSheet("color: #9aa0ac;")
+        self._scroll_to_top()
         self._adjust_height()
         self._position_at_cursor()
         self.show()
@@ -177,22 +204,23 @@ class TranslationPopup(QFrame):
             self._timer.stop()
 
     def _adjust_height(self) -> None:
-        # QLabel heightForWidth 在未 show 时可能不准确，先确保 widget 已创建
-        avail_w = POPUP_WIDTH - 2 * POPUP_MARGIN  # = 356
-        src_h = (
-            self._source_label.heightForWidth(avail_w)
-            if self._source_label.isVisible() and self._source_label.text()
-            else 0
-        )
+        # 可用宽度扣除滚动条预留，保证滚动条出现前后文本不重排
+        avail_w = POPUP_WIDTH - 2 * POPUP_MARGIN - _SCROLLBAR_RESERVE
         tgt_h = self._target_label.heightForWidth(avail_w)
         if tgt_h < 18:
             tgt_h = 18  # 单行最小高度，避免空内容时窗口坍缩
 
         # Chrome: top margin(10) + bottom margin(12) + spacing(6)
-        # + header(close btn 20 + source label padding ≈ 26)
-        chrome = 54
-        total = src_h + tgt_h + chrome
+        # + header(close btn 20)
+        chrome = 48
+        total = tgt_h + chrome
         self.setFixedHeight(min(max(total, 60), POPUP_MAX_HEIGHT))
+
+    def _scroll_to_top(self) -> None:
+        self._vbar.setValue(0)
+
+    def _scroll_to_bottom(self) -> None:
+        self._vbar.setValue(self._vbar.maximum())
 
     def _position_at_cursor(self) -> None:
         cursor = QCursor.pos()

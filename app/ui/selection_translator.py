@@ -150,9 +150,9 @@ class SelectionTranslator(QObject):
             return
         self._last_text = stripped
 
-        # 3. 取词成功，更新为原文 + 翻译中
+        # 3. 取词成功，切换为"翻译中"状态
         if self._popup:
-            self._popup.show_loading(stripped)
+            self._popup.show_loading()
 
         translator = Translator(self._backend, self._config)
         self._worker = TranslateWorker(translator, stripped)

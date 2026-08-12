@@ -125,7 +125,7 @@ class SettingsDialog(QDialog):
         self.max_tokens_spin.setValue(int(b.get("max_tokens", 2048)))
         self.chunk_spin.setValue(int(t.get("chunk_chars", 2000)))
         style = t.get("style", "忠实原文")
-        if style in self.style_combo:
+        if self.style_combo.findText(style) >= 0:
             self.style_combo.setCurrentText(style)
 
     def _on_preset(self) -> None:

@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "Tram Translator"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.0b1"
 
 CONFIG_DIR = Path(os.path.expanduser("~")) / ".tram"
 CONFIG_FILE = CONFIG_DIR / "config.json"

@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._config = config
         self._worker: TranslateWorker | None = None
+        self._suppress_failure = False  # 主动中断翻译时不弹错误框
         self._backend = self._make_backend()
 
         self.setWindowTitle("Tram 离线翻译")
@@ -106,6 +107,28 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._backend = self._make_backend()
+
+    def _stop_active_translation(self) -> None:
+        """停止并等待当前翻译会话结束。
+
+        切换模型/后端前调用。本地推理服务切换模型时需重新装载，
+        期间不产出 token，request_stop 依赖的 on_token 检查无法触发；
+        故先等待软停止，超时则主动关闭后端连接以打断阻塞的流式请求。
+        """
+        worker = self._worker
+        if not worker or not worker.isRunning():
+            return
+        self._suppress_failure = True  # 主动中断引发的失败不应弹错误框
+        worker.request_stop()
+        self.status.showMessage("正在停止当前翻译，以便切换模型…")
+        worker.wait(2000)
+        if worker.isRunning():
+            # 模型装载中无 token 产出，软停止未生效，关闭连接强行打断
+            try:
+                self._backend.close()
+            except Exception:
+                pass
+            worker.wait(3000)
 
     # ---------- UI ----------
     def _build_ui(self) -> None:
@@ -229,6 +252,8 @@ class MainWindow(QMainWindow):
 
     def _on_failed(self, message: str) -> None:
         self.status.showMessage("翻译失败")
+        if self._suppress_failure:
+            return  # 切换模型时主动中断引发的失败，静默
         QMessageBox.critical(
             self, "翻译失败",
             f"{message}\n\n请检查设置中的后端地址、模型名称是否正确，"
@@ -238,6 +263,7 @@ class MainWindow(QMainWindow):
     def _on_worker_finished(self) -> None:
         self.translate_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self._suppress_failure = False
         if self._worker:
             self._worker = None
 
@@ -245,9 +271,15 @@ class MainWindow(QMainWindow):
     def open_settings(self) -> None:
         dlg = SettingsDialog(self._config, self)
         if dlg.exec():
+            # 切换模型前先停止当前翻译会话：本地模型切换需重新装载，
+            # 若不停止，旧请求会 hang 在装载阶段且复用旧 backend 会出错。
+            self._stop_active_translation()
             save_config(self._config)
             self._rebuild_backend()
             self._update_status()
+            self.status.showMessage(
+                f"已切换到模型：{self._config['backend'].get('model', '未配置')}"
+            )
 
     def open_glossary(self) -> None:
         # 打开前把当前术语表读入配置，供翻译编排使用

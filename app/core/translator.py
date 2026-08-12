@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Callable, Optional
 
 from .backend import BackendError, OpenAIBackend
@@ -24,11 +25,13 @@ class Translator:
         text: str,
         on_token: Optional[Callable[[str], None]] = None,
         on_chunk: Optional[Callable[[int, int], None]] = None,
+        on_retry: Optional[Callable[[], None]] = None,
     ) -> str:
         """翻译整段文本，返回完整译文。
 
         on_token: 每个增量 token 回调（含换行）。
         on_chunk: 每个块开始/结束回调 (index, total)，可用于进度显示。
+        on_retry: 单块翻译重试前回调，用于通知 UI 回滚该块已显示的内容。
         """
         tcfg = self.config.get("translation", {})
         target_lang = tcfg.get("target_lang", "中文（简体）")
@@ -64,15 +67,24 @@ class Translator:
             )
 
             result = self._translate_chunk(
-                messages, on_token=on_token
+                messages, on_token=on_token, on_retry=on_retry
             )
             full_result.append(result)
             prev_chunk = chunk
 
         return "\n".join(full_result)
 
-    def _translate_chunk(self, messages: list[dict], on_token) -> str:
-        """翻译单块，失败自动重试（最多 3 次，指数退避）。"""
+    def _translate_chunk(
+        self,
+        messages: list[dict],
+        on_token,
+        on_retry: Optional[Callable[[], None]] = None,
+    ) -> str:
+        """翻译单块，失败自动重试（最多 3 次，指数退避）。
+
+        重试前调用 on_retry（若有），让 UI 回滚该块已显示的内容，
+        并清空已收集的 token，避免重复累积。
+        """
         bcfg = self.config.get("backend", {})
         temperature = bcfg.get("temperature", 0.2)
         max_tokens = bcfg.get("max_tokens", 2048)
@@ -86,6 +98,12 @@ class Translator:
                 on_token(t)
 
         for attempt in range(3):
+            if attempt > 0:
+                # 重试：回滚 UI 已显示的本块内容，清空收集结果
+                if on_retry:
+                    on_retry()
+                collected.clear()
+                time.sleep(1.5 * attempt)  # 退避：1.5s / 3.0s
             try:
                 self.backend.chat_stream(
                     messages,
@@ -96,7 +114,4 @@ class Translator:
                 return "".join(collected).strip()
             except BackendError as e:
                 last_err = e
-                if attempt < 2:
-                    import time
-                    time.sleep(1.5 * (attempt + 1))  # 简单退避
         raise last_err or BackendError("翻译失败")

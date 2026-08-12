@@ -24,7 +24,7 @@ def main() -> int:
     config["glossary"] = gs.load_glossary()
 
     window = MainWindow(config)
-    window.show()
+    # 主窗口隐藏到托盘；划词翻译由托盘菜单管理
     return app.exec()
 
 

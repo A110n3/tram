@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "Tram Translator"
-APP_VERSION = "0.1.0-beta"
+APP_VERSION = "0.2.0"
 
 CONFIG_DIR = Path(os.path.expanduser("~")) / ".tram"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -31,6 +31,12 @@ DEFAULT_CONFIG: dict = {
         "target_lang": "中文（简体）",
         "chunk_chars": 2000,
         "style": "忠实原文",
+    },
+    "selection": {
+        "enabled": False,  # 划词翻译模式开关
+        "hotkey": "Ctrl+Shift+T",  # 全局热键：触发取词翻译
+        "min_chars": 2,  # 选中文本短于此值跳过，避免误触发
+        "auto_hide_ms": 0,  # 悬浮窗自动隐藏时间，0=失焦隐藏
     },
 }
 

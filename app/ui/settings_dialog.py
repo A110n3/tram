@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QGroupBox,
     QFormLayout,
     QHBoxLayout,
+    QKeySequenceEdit,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -18,6 +21,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from PyQt6.QtGui import QKeySequence
 
 from ..core.backend import BackendError, OpenAIBackend, test_connection
 
@@ -29,12 +34,32 @@ PRESETS = {
 }
 
 
+class _TestConnectionWorker(QThread):
+    """后台执行 test_connection，避免阻塞设置对话框。"""
+    ok = pyqtSignal(str)
+    err = pyqtSignal(str)
+
+    def __init__(self, base_url: str, api_key: str, model: str, parent=None):
+        super().__init__(parent)
+        self._base_url = base_url
+        self._api_key = api_key
+        self._model = model
+
+    def run(self) -> None:
+        try:
+            reply = test_connection(self._base_url, self._api_key, self._model)
+            self.ok.emit(reply)
+        except BackendError as e:
+            self.err.emit(str(e))
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
         self._config = config
         self.setWindowTitle("设置")
         self.setMinimumWidth(460)
+        self._test_worker: _TestConnectionWorker | None = None
         self._build_ui()
         self._load_values()
 
@@ -101,6 +126,23 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(trans_box)
 
+        # 划词翻译分组
+        sel_gb = QGroupBox("划词翻译")
+        sl = QFormLayout(sel_gb)
+        sl.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.selection_enabled_cb = QCheckBox("启用划词翻译")
+        self.selection_hotkey_edit = QKeySequenceEdit()
+        self.selection_min_chars_spin = QSpinBox()
+        self.selection_min_chars_spin.setRange(1, 50)
+        self.selection_min_chars_spin.setSingleStep(1)
+
+        sl.addRow("", self.selection_enabled_cb)
+        sl.addRow("全局热键", self.selection_hotkey_edit)
+        sl.addRow("最小字符数", self.selection_min_chars_spin)
+
+        layout.addWidget(sel_gb)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -128,6 +170,16 @@ class SettingsDialog(QDialog):
         if self.style_combo.findText(style) >= 0:
             self.style_combo.setCurrentText(style)
 
+        sel = self._config.get("selection", {})
+        self.selection_enabled_cb.setChecked(sel.get("enabled", False))
+        self.selection_hotkey_edit.setKeySequence(
+            QKeySequence.fromString(
+                sel.get("hotkey", "Ctrl+Shift+T"),
+                QKeySequence.SequenceFormat.PortableText,
+            )
+        )
+        self.selection_min_chars_spin.setValue(int(sel.get("min_chars", 2)))
+
     def _on_preset(self) -> None:
         url = self.preset_combo.currentData()
         if url:
@@ -148,6 +200,14 @@ class SettingsDialog(QDialog):
             chunk_chars=self.chunk_spin.value(),
             style=self.style_combo.currentText(),
         )
+        self._config.setdefault("selection", {}).update(
+            enabled=self.selection_enabled_cb.isChecked(),
+            hotkey=self.selection_hotkey_edit.keySequence().toString(
+                QKeySequence.SequenceFormat.PortableText
+            ) or "Ctrl+Shift+T",
+            min_chars=self.selection_min_chars_spin.value(),
+            auto_hide_ms=self._config.get("selection", {}).get("auto_hide_ms", 0),
+        )
         self.accept()
 
     def _on_test(self) -> None:
@@ -160,17 +220,29 @@ class SettingsDialog(QDialog):
         self.test_btn.setEnabled(False)
         self.test_result.setText("测试中…")
         self.test_result.setStyleSheet("color: #888;")
-        # 简单同步测试（请求很快，不阻塞太久）
-        try:
-            reply = test_connection(
-                url, self.api_key_edit.text().strip(), model
-            )
-            self.test_result.setText(
-                f"✅ 连接成功，模型回应：{reply.strip()[:40] or '(空)'}"
-            )
-            self.test_result.setStyleSheet("color: #27ae60;")
-        except BackendError as e:
-            self.test_result.setText(f"❌ {e}")
-            self.test_result.setStyleSheet("color: #c0392b;")
-        finally:
-            self.test_btn.setEnabled(True)
+        # 后台线程执行，避免后端慢时冻结对话框
+        self._test_worker = _TestConnectionWorker(
+            url, self.api_key_edit.text().strip(), model
+        )
+        self._test_worker.ok.connect(self._on_test_ok)
+        self._test_worker.err.connect(self._on_test_err)
+        self._test_worker.finished.connect(
+            lambda: self.test_btn.setEnabled(True)
+        )
+        self._test_worker.start()
+
+    def _on_test_ok(self, reply: str) -> None:
+        self.test_result.setText(
+            f"✅ 连接成功，模型回应：{reply.strip()[:40] or '(空)'}"
+        )
+        self.test_result.setStyleSheet("color: #27ae60;")
+
+    def _on_test_err(self, message: str) -> None:
+        self.test_result.setText(f"❌ {message}")
+        self.test_result.setStyleSheet("color: #c0392b;")
+
+    def closeEvent(self, event) -> None:
+        # 等待测试线程结束，避免 QThread 析构时仍在运行
+        if self._test_worker and self._test_worker.isRunning():
+            self._test_worker.wait(2000)
+        super().closeEvent(event)

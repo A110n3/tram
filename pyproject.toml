@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "tram"
-version = "0.2.0"
+version = "0.2.1"
 description = "Tram - 离线划词翻译，接入本地大模型"
 readme = "README.md"
 requires-python = ">=3.10"

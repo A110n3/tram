@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 
 APP_NAME = "Tram Translator"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 
 CONFIG_DIR = Path(os.path.expanduser("~")) / ".tram"
 CONFIG_FILE = CONFIG_DIR / "config.json"

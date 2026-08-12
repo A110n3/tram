@@ -68,15 +68,32 @@ def _send_key(vk: int, up: bool = False) -> None:
     _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
 
 
+def _set_clipboard_text(text: str, retries: int = 3) -> bool:
+    """设置剪贴板文本，带重试。返回是否成功。"""
+    clip = QApplication.clipboard()
+    for i in range(retries):
+        try:
+            clip.setText(text)
+            return True
+        except Exception:
+            if i < retries - 1:
+                time.sleep(0.05)
+    return False
+
+
 def grab_selection(timeout_ms: int = 400) -> Optional[str]:
     """获取当前选中的文本。
 
     流程：备份剪贴板文本 -> 清空 -> 模拟 Ctrl+C -> 轮询等待剪贴板
     出现新文本 -> 返回；最后恢复原剪贴板文本。无选中或超时返回 None。
+
+    剪贴板操作含重试和静默失败，避免 COM error 0x800401d0 崩溃。
     """
     clip = QApplication.clipboard()
     old = clip.text()
-    clip.setText("")  # 清空，便于检测复制是否产生了新内容
+
+    # 清空剪贴板以便检测 Ctrl+C 是否产出了新内容
+    _set_clipboard_text("")
 
     try:
         _send_key(VK_CONTROL, up=False)
@@ -87,11 +104,15 @@ def grab_selection(timeout_ms: int = 400) -> Optional[str]:
         deadline = time.monotonic() + timeout_ms / 1000.0
         text = ""
         while time.monotonic() < deadline:
-            text = clip.text()
+            try:
+                text = clip.text()
+            except Exception:
+                pass
             if text:
                 break
             time.sleep(0.02)
         return text or None
     finally:
+        # 尽力恢复原剪贴板；失败则静默（剪贴板被其他程序占用时重试）
         if old:
-            clip.setText(old)
+            _set_clipboard_text(old)

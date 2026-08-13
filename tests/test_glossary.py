@@ -87,4 +87,5 @@ def test_to_prompt_block_format():
     entries = [{"source": "API", "target": "接口"}]
     block = to_prompt_block(entries)
     assert "API => 接口" in block
-    assert "术语表" in block
+    # 块头为英文（兼容不支持非 ASCII 请求的后端）
+    assert "Glossary" in block

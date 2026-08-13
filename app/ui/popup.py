@@ -10,6 +10,7 @@ from __future__ import annotations
 from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer
 from PyQt6.QtGui import QCursor, QGuiApplication
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -166,8 +167,6 @@ class TranslationPopup(QFrame):
         调用 processEvents 强制刷新一次，确保窗口在 grab_selection
         阻塞主线程前已经渲染。
         """
-        from PyQt6.QtWidgets import QApplication
-
         self._target_label.setStyleSheet("")  # 清除错误样式
         self._target_label.setText("正在捕获…")
         self._scroll_to_top()

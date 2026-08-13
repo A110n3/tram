@@ -17,10 +17,6 @@ logger = logging.getLogger(__name__)
 Entry = dict  # {"source": str, "target": str}
 
 
-def ensure_file() -> None:
-    GLOSSARY_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-
 def load_glossary() -> list[Entry]:
     """读取术语表，对损坏/非 dict 元素有防御。
 
@@ -54,11 +50,16 @@ def save_glossary(entries: list[Entry]) -> None:
 
 
 def to_prompt_block(entries: list[Entry]) -> str:
-    """把术语表转成提示词块，无条目时返回空字符串。"""
+    """把术语表转成提示词块，无条目时返回空字符串。
+
+    块头使用英文：部分后端无法处理请求中的非 ASCII 字符。
+    术语条目本身是用户数据，保持原样。
+    """
     if not entries:
         return ""
     lines = "\n".join(f"- {e['source']} => {e['target']}" for e in entries)
     return (
-        "术语表（以下术语必须严格使用指定译文，不得意译）：\n"
+        "Glossary (the following terms MUST use the given translations"
+        " exactly; do not paraphrase them):\n"
         f"{lines}"
     )

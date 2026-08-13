@@ -14,6 +14,7 @@ import logging
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from ..core.backend import BackendError, test_connection
 from ..core.translator import Translator
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,6 @@ class _StopRequested(Exception):
 
 class TranslateWorker(QThread):
     token = pyqtSignal(str)
-    chunk = pyqtSignal(int, int)
     retry = pyqtSignal()
     succeeded = pyqtSignal(str)
     failed = pyqtSignal(str)
@@ -55,7 +55,6 @@ class TranslateWorker(QThread):
             result = self._translator.translate(
                 self._text,
                 on_token=on_token,
-                on_chunk=lambda i, n: self.chunk.emit(i, n),
                 on_retry=self.retry.emit,
             )
             if not self._stop_flag:
@@ -66,3 +65,42 @@ class TranslateWorker(QThread):
             if not self._stop_flag:
                 logger.warning("翻译失败: %s", e, exc_info=True)
                 self.failed.emit(str(e))
+
+
+class TestConnectionWorker(QThread):
+    """后台执行 test_connection，避免阻塞 UI。
+
+    设置对话框的「测试连接」按钮与托盘菜单切换目标语言共用。
+    """
+
+    ok = pyqtSignal(str)
+    err = pyqtSignal(str)
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        use_system_role: bool = True,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._base_url = base_url
+        self._api_key = api_key
+        self._model = model
+        self._use_system_role = use_system_role
+
+    def run(self) -> None:
+        try:
+            reply = test_connection(
+                self._base_url,
+                self._api_key,
+                self._model,
+                use_system_role=self._use_system_role,
+            )
+            self.ok.emit(reply)
+        except BackendError as e:
+            self.err.emit(str(e))
+        except Exception as e:
+            logger.warning("测试连接异常", exc_info=True)
+            self.err.emit(str(e))

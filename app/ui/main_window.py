@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
@@ -17,9 +18,11 @@ from PyQt6.QtWidgets import (
 )
 
 from ..config import save_config
+from ..core.prompts import TARGET_LANGS
 from .glossary_dialog import GlossaryDialog
 from .selection_translator import SelectionTranslator
 from .settings_dialog import SettingsDialog
+from .worker import TestConnectionWorker
 
 
 class MainWindow(QMainWindow):
@@ -35,6 +38,10 @@ class MainWindow(QMainWindow):
         # 划词翻译服务
         self._selection_translator = SelectionTranslator(self._config)
         self._selection_translator.hotkey_status.connect(self._on_hotkey_status)
+
+        # 切换目标语言后的连接测试线程
+        self._lang_test_worker: TestConnectionWorker | None = None
+        self._lang_test_lang: str = ""
 
         # 托盘
         self._create_tray()
@@ -92,6 +99,23 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         self._selection_action = self._act(menu.addAction("划词翻译"), self._toggle_selection)
         self._selection_action.setCheckable(True)
+
+        # 目标语言快捷子菜单
+        lang_menu = menu.addMenu("目标语言")
+        assert lang_menu is not None
+        self._lang_group = QActionGroup(self)
+        self._lang_group.setExclusive(True)
+        current_lang = self._config.get("translation", {}).get(
+            "target_lang", "中文（简体）"
+        )
+        for lang in TARGET_LANGS:
+            act = self._lang_group.addAction(lang)
+            assert act is not None  # QActionGroup.addAction 总是返回 QAction
+            act.setCheckable(True)
+            act.setChecked(lang == current_lang)
+            lang_menu.addAction(act)
+        self._lang_group.triggered.connect(self._on_target_lang_changed)
+
         menu.addSeparator()
         self._act(menu.addAction("设置…"), self.open_settings)
         self._act(menu.addAction("术语表…"), self.open_glossary)
@@ -131,6 +155,66 @@ class MainWindow(QMainWindow):
             self._selection_translator.stop()
         self._tray_icon.setToolTip(
             f"Tram - 划词: {'开' if enabled else '关'}"
+        )
+
+    def _on_target_lang_changed(self, action: QAction) -> None:
+        """托盘菜单快捷切换目标语言。
+
+        即时保存配置，随后后台测试模型连接，测试通过后才弹出
+        切换成功通知；失败则弹出警告，避免用户以为已生效。
+        """
+        lang = action.text()
+        self._config.setdefault("translation", {})["target_lang"] = lang
+        save_config(self._config)
+        self._start_lang_test(lang)
+
+    def _start_lang_test(self, lang: str) -> None:
+        """后台测试模型连接，结果由 _on_lang_test_ok/_err 通知。"""
+        self._drop_lang_test_worker()
+        self._lang_test_lang = lang
+        b = self._config.get("backend", {})
+        w = TestConnectionWorker(
+            b.get("base_url", ""),
+            b.get("api_key", "ollama"),
+            b.get("model", ""),
+            use_system_role=bool(b.get("use_system_role", True)),
+            parent=self,
+        )
+        self._lang_test_worker = w
+        w.ok.connect(self._on_lang_test_ok)
+        w.err.connect(self._on_lang_test_err)
+        # 线程结束后自动清理，避免 QThread destroyed while running
+        w.finished.connect(w.deleteLater)
+        w.start()
+
+    def _drop_lang_test_worker(self) -> None:
+        """作废上一次未完成的测试：断开结果信号，线程自行结束并清理。
+
+        快速连续切换语言时，只认最新一次测试的结果。
+        """
+        w = self._lang_test_worker
+        if w is None:
+            return
+        with contextlib.suppress(TypeError, RuntimeError):
+            w.ok.disconnect(self._on_lang_test_ok)
+        with contextlib.suppress(TypeError, RuntimeError):
+            w.err.disconnect(self._on_lang_test_err)
+        self._lang_test_worker = None
+
+    def _on_lang_test_ok(self, _reply: str) -> None:
+        self._lang_test_worker = None
+        self._tray_icon.showMessage(
+            "Tram 划词", f"目标语言已切换为 {self._lang_test_lang}",
+            QSystemTrayIcon.MessageIcon.Information, 2000,
+        )
+
+    def _on_lang_test_err(self, message: str) -> None:
+        self._lang_test_worker = None
+        self._tray_icon.showMessage(
+            "Tram 划词",
+            f"目标语言已切换为 {self._lang_test_lang}，"
+            f"但模型连接测试失败：\n{message.strip()[:120]}",
+            QSystemTrayIcon.MessageIcon.Warning, 5000,
         )
 
     def _apply_selection_config(self) -> None:
@@ -174,6 +258,16 @@ class MainWindow(QMainWindow):
             self._selection_translator.rebuild_backend()
             # 同步托盘菜单勾选状态与 tooltip
             self._apply_selection_config()
+            # 同步托盘目标语言单选
+            self._sync_target_lang_action()
+
+    def _sync_target_lang_action(self) -> None:
+        """设置保存后同步托盘菜单的目标语言选中状态。"""
+        current = self._config.get("translation", {}).get(
+            "target_lang", "中文（简体）"
+        )
+        for action in self._lang_group.actions():
+            action.setChecked(action.text() == current)
 
     def open_glossary(self) -> None:
         from ..core import glossary as gs
@@ -185,6 +279,11 @@ class MainWindow(QMainWindow):
     # ---------- 退出 ----------
     def quit_app(self) -> None:
         self._quitting = True
+        # 等待进行中的连接测试退出，避免 QThread 析构时仍在运行
+        w = self._lang_test_worker
+        if w is not None and w.isRunning():
+            w.wait(2000)
+        self._lang_test_worker = None
         self._selection_translator.shutdown()
         app = QApplication.instance()
         if app is not None:

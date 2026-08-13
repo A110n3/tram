@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -25,8 +25,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core.backend import BackendError, test_connection
 from ..core.hotkey import HotkeyError, parse_hotkey, test_hotkey_available
+from ..core.prompts import SOURCE_LANGS, TARGET_LANGS
+from .worker import TestConnectionWorker
 
 logger = logging.getLogger(__name__)
 
@@ -38,35 +39,13 @@ PRESETS = {
 }
 
 
-class _TestConnectionWorker(QThread):
-    """后台执行 test_connection，避免阻塞设置对话框。"""
-    ok = pyqtSignal(str)
-    err = pyqtSignal(str)
-
-    def __init__(self, base_url: str, api_key: str, model: str, parent=None):
-        super().__init__(parent)
-        self._base_url = base_url
-        self._api_key = api_key
-        self._model = model
-
-    def run(self) -> None:
-        try:
-            reply = test_connection(self._base_url, self._api_key, self._model)
-            self.ok.emit(reply)
-        except BackendError as e:
-            self.err.emit(str(e))
-        except Exception as e:
-            logger.warning("测试连接异常", exc_info=True)
-            self.err.emit(str(e))
-
-
 class SettingsDialog(QDialog):
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
         self._config = config
         self.setWindowTitle("设置")
         self.setMinimumWidth(460)
-        self._test_worker: _TestConnectionWorker | None = None
+        self._test_worker: TestConnectionWorker | None = None
         self._build_ui()
         self._load_values()
 
@@ -90,10 +69,18 @@ class SettingsDialog(QDialog):
         self.model_edit = QLineEdit()
         self.model_edit.setPlaceholderText("例如 qwen2.5:7b / llama3.1:8b")
 
+        self.use_system_role_cb = QCheckBox("使用 system 消息")
+        self.use_system_role_cb.setToolTip(
+            "翻译指令以 system 角色消息发送。部分后端不支持 system 消息"
+            "（请求会返回 5xx 错误），遇到翻译报错 500/502 时可取消勾选，"
+            "改为将指令并入用户消息发送。"
+        )
+
         bf.addRow("后端预设", self.preset_combo)
         bf.addRow("Base URL", self.base_url_edit)
         bf.addRow("API Key", self.api_key_edit)
         bf.addRow("模型名称", self.model_edit)
+        bf.addRow("", self.use_system_role_cb)
 
         test_row = QHBoxLayout()
         self.test_btn = QPushButton("测试连接")
@@ -126,6 +113,17 @@ class SettingsDialog(QDialog):
         self.style_combo = QComboBox()
         self.style_combo.addItems(["忠实原文", "自然流畅", "简洁精炼"])
 
+        self.source_lang_combo = QComboBox()
+        self.source_lang_combo.addItems(SOURCE_LANGS)
+        self.source_lang_combo.setToolTip(
+            "选择源语言可辅助翻译。默认自动识别，由模型自行判断。"
+        )
+
+        self.target_lang_combo = QComboBox()
+        self.target_lang_combo.addItems(TARGET_LANGS)
+
+        tf.addRow("源语言", self.source_lang_combo)
+        tf.addRow("目标语言", self.target_lang_combo)
         tf.addRow("温度", self.temperature_spin)
         tf.addRow("最大输出 tokens", self.max_tokens_spin)
         tf.addRow("分块长度", self.chunk_spin)
@@ -176,9 +174,16 @@ class SettingsDialog(QDialog):
         self.base_url_edit.setText(url)
         self.api_key_edit.setText(b.get("api_key", ""))
         self.model_edit.setText(b.get("model", ""))
+        self.use_system_role_cb.setChecked(bool(b.get("use_system_role", True)))
         self.temperature_spin.setValue(float(b.get("temperature", 0.2)))
         self.max_tokens_spin.setValue(int(b.get("max_tokens", 2048)))
         self.chunk_spin.setValue(int(t.get("chunk_chars", 2000)))
+        source_lang = t.get("source_lang", "自动识别")
+        if self.source_lang_combo.findText(source_lang) >= 0:
+            self.source_lang_combo.setCurrentText(source_lang)
+        target_lang = t.get("target_lang", "中文（简体）")
+        if self.target_lang_combo.findText(target_lang) >= 0:
+            self.target_lang_combo.setCurrentText(target_lang)
         style = t.get("style", "忠实原文")
         if self.style_combo.findText(style) >= 0:
             self.style_combo.setCurrentText(style)
@@ -238,8 +243,11 @@ class SettingsDialog(QDialog):
             model=self.model_edit.text().strip(),
             temperature=self.temperature_spin.value(),
             max_tokens=self.max_tokens_spin.value(),
+            use_system_role=self.use_system_role_cb.isChecked(),
         )
         self._config["translation"].update(
+            source_lang=self.source_lang_combo.currentText(),
+            target_lang=self.target_lang_combo.currentText(),
             chunk_chars=self.chunk_spin.value(),
             style=self.style_combo.currentText(),
         )
@@ -289,8 +297,11 @@ class SettingsDialog(QDialog):
         self.test_result.setText("测试中…")
         self.test_result.setStyleSheet("color: #888;")
         # 后台线程执行，避免后端慢时冻结对话框
-        self._test_worker = _TestConnectionWorker(
-            url, self.api_key_edit.text().strip(), model
+        self._test_worker = TestConnectionWorker(
+            url,
+            self.api_key_edit.text().strip(),
+            model,
+            use_system_role=self.use_system_role_cb.isChecked(),
         )
         self._test_worker.ok.connect(self._on_test_ok)
         self._test_worker.err.connect(self._on_test_err)

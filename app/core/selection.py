@@ -17,7 +17,6 @@ from PyQt6.QtWidgets import QApplication
 
 logger = logging.getLogger(__name__)
 
-INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 
 VK_CONTROL = 0x11

@@ -18,15 +18,16 @@ from .prompts import build_messages
 
 logger = logging.getLogger(__name__)
 
-# 4xx 状态码视为永久错误，不重试
-_PERMANENT_STATUS_RANGE = (400, 500)
+# 4xx 状态码视为永久错误，不重试；5xx 视为瞬态错误，可重试
+_PERMANENT_RANGE = (400, 500)  # [400, 500)
 _MAX_RETRIES = 3
 
 
 def _is_retryable(err: Exception) -> bool:
     """判断错误是否值得重试（瞬态错误）。"""
     if isinstance(err, BackendError) and err.status_code is not None:
-        return err.status_code not in _PERMANENT_STATUS_RANGE
+        lo, hi = _PERMANENT_RANGE
+        return not (lo <= err.status_code < hi)
     # 网络超时等无状态码错误可重试
     return True
 
@@ -50,9 +51,14 @@ class Translator:
         on_retry: 单块翻译重试前回调，用于通知 UI 回滚该块已显示的内容。
         """
         tcfg = self.config.get("translation", {})
+        source_lang = tcfg.get("source_lang", "自动识别")
         target_lang = tcfg.get("target_lang", "中文（简体）")
         style = tcfg.get("style", "忠实原文")
         chunk_chars = tcfg.get("chunk_chars", 2000)
+        # 不支持 system 角色的后端：系统提示词并入 user 消息
+        use_system_role = self.config.get("backend", {}).get(
+            "use_system_role", True
+        )
 
         glossary_block = to_prompt_block(self.config.get("glossary", []))
         chunks = split_text(text, chunk_chars)
@@ -67,17 +73,21 @@ class Translator:
 
             context_block = ""
             if prev_chunk is not None:
+                # 块头使用英文：部分后端无法处理请求中的非 ASCII 字符
                 context_block = (
-                    "前文已翻译的内容参考（保持术语、语气、风格一致，无需重复翻译）：\n"
+                    "Previously translated content for reference (keep terms,"
+                    " tone and style consistent; do not retranslate it):\n"
                     f"{prev_chunk}"
                 )
 
             messages = build_messages(
                 chunk,
                 target_lang=target_lang,
+                source_lang=source_lang,
                 style=style,
                 glossary_block=glossary_block,
                 context_block=context_block,
+                merge_system=not use_system_role,
             )
 
             result = self._translate_chunk(

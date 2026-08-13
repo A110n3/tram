@@ -1,5 +1,7 @@
 # Tram — 离线划词翻译
 
+买了一个带NPU的笔记本电脑，发现基本没什么用。为了给我花钱买的NPU找事做，我搓了这个可以接入本地模型的划词翻译软件，分享给有需要的朋友。
+
 接入本地大模型（Ollama / LM Studio / vLLM 等任意 OpenAI 兼容后端）的**纯离线**划词翻译工具。
 
 选中文本 → 按热键 → 悬浮窗流式显示译文。全程本地运行，不联网、不上传。
@@ -31,7 +33,7 @@
 **方式二：源码运行**
 
 ```bash
-pip install -r requirements.txt
+pip install .
 python -m app.main
 ```
 
@@ -53,7 +55,7 @@ python -m app.main
 ## 开发与测试
 
 ```bash
-pip install pytest ruff mypy pyinstaller
+pip install ".[dev]"
 
 python -m pytest tests/ -q      # 运行测试
 python -m ruff check app/ tests/ # 代码检查

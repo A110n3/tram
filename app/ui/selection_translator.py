@@ -43,7 +43,8 @@ class SelectionTranslator(QObject):
         self._popup: TranslationPopup | None = None
         self._hotkey_thread: GlobalHotkeyThread | None = None
         self._worker: TranslateWorker | None = None
-        self._last_text: str = ""
+        self._last_text: str = ""  # 最近一次成功翻译的文本，用于去重
+        self._pending_text: str = ""  # 当前正在翻译的文本
 
     # ---------- 后端 ----------
     def _make_backend(self) -> OpenAIBackend:
@@ -148,7 +149,10 @@ class SelectionTranslator(QObject):
             if self._popup:
                 self._popup.hide()
             return
-        self._last_text = stripped
+        # 注意：不在此处记录 _last_text。翻译失败时用户常会重试
+        # 同一文本，若失败也记录去重，重试会被静默拦截。
+        # 成功/失败时分别由 _on_selection_success/_on_selection_failed 更新。
+        self._pending_text = stripped
 
         # 3. 取词成功，切换为"翻译中"状态
         if self._popup:
@@ -178,10 +182,14 @@ class SelectionTranslator(QObject):
 
     # ---------- 翻译回调 ----------
     def _on_selection_success(self, result: str) -> None:
+        # 成功后才记录去重文本
+        self._last_text = self._pending_text
         if self._popup:
             self._popup.set_translation(result)
 
     def _on_selection_failed(self, message: str) -> None:
+        # 失败后清空记录，允许立即重试同一文本
+        self._last_text = ""
         if self._popup:
             self._popup.show_error(message)
 

@@ -18,6 +18,8 @@ from collections.abc import Callable
 
 import httpx
 
+from .prompts import build_messages
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 180
@@ -43,8 +45,11 @@ class OpenAIBackend:
         self.api_key = api_key or "ollama"
         self.model = model
         self.timeout = timeout
+        # trust_env=False：禁止读取系统代理（环境变量 + Windows 注册表）。
+        # 本地推理后端必须直连；若走系统代理（如 Clash），发往
+        # localhost 的请求会被代理拒绝并返回 502 空响应体。
         self._client = httpx.Client(
-            base_url=self.base_url, timeout=timeout
+            base_url=self.base_url, timeout=timeout, trust_env=False
         )
         self._cancel_event = threading.Event()
 
@@ -96,7 +101,8 @@ class OpenAIBackend:
                 "POST", "/chat/completions", json=payload, headers=self._headers()
             ) as resp:
                 if resp.status_code >= 400:
-                    body = resp.read().decode("utf-8", errors="replace")[:500]
+                    body = resp.read().decode("utf-8", errors="replace")
+                    body = body.strip()[:500] or "（无响应体）"
                     raise BackendError(
                         f"后端返回 {resp.status_code}: {body}",
                         status_code=resp.status_code,
@@ -137,14 +143,22 @@ class OpenAIBackend:
             logger.debug("关闭 httpx client 时异常", exc_info=True)
 
 
-def test_connection(base_url: str, api_key: str, model: str) -> str:
-    """发送最小请求，验证后端可用。返回后端实际回应文本。"""
+def test_connection(
+    base_url: str, api_key: str, model: str, use_system_role: bool = True
+) -> str:
+    """发送与真实翻译结构一致的最小请求，验证后端可用。
+
+    使用 build_messages 构造消息（默认含 system 角色），
+    以便在设置阶段就发现不支持 system 消息的后端（此类后端
+    连接测试能通过简单请求、但真实翻译会返回 5xx）。
+    """
+    messages = build_messages(
+        "Hello",
+        target_lang="中文（简体）",
+        merge_system=not use_system_role,
+    )
     backend = OpenAIBackend(base_url, api_key, model, timeout=30)
     try:
-        return backend.chat(
-            [{"role": "user", "content": "Hi"}],
-            temperature=0.0,
-            max_tokens=8,
-        )
+        return backend.chat(messages, temperature=0.0, max_tokens=8)
     finally:
         backend.close()

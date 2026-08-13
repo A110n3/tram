@@ -11,11 +11,10 @@ import contextlib
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 APP_NAME = "Tram Translator"
-APP_VERSION = "0.2.1"
 
 CONFIG_DIR = Path(os.path.expanduser("~")) / ".tram"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -35,11 +34,14 @@ class BackendConfig:
     temperature: float = 0.2
     max_tokens: int = 2048
     timeout: int = 180
+    # 部分后端（如 Ryzen AI ONNX 服务）不支持 system 角色消息，
+    # 带 system 的请求会返回 5xx。关闭后系统提示词并入用户消息发送。
+    use_system_role: bool = True
 
 
 @dataclass
 class TranslationConfig:
-    source_lang: str = "auto"
+    source_lang: str = "自动识别"  # 源语言，自动识别由模型判断
     target_lang: str = "中文（简体）"
     chunk_chars: int = 2000
     style: str = "忠实原文"
@@ -60,35 +62,9 @@ class TramConfig:
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     glossary: list = field(default_factory=list)  # 运行时注入，不持久化
 
-    @classmethod
-    def from_dict(cls, data: dict) -> TramConfig:
-        """从嵌套 dict 构造，忽略未知字段，缺失项用默认值。"""
-        cfg = cls()
-        if not isinstance(data, dict):
-            return cfg
-        for f in fields(cls):
-            val = data.get(f.name)
-            if val is None:
-                continue
-            if is_dataclass(f.type) if isinstance(f.type, type) else False:
-                sub = getattr(cfg, f.name)
-                if isinstance(val, dict):
-                    for k, v in val.items():
-                        if hasattr(sub, k):
-                            setattr(sub, k, v)
-            else:
-                setattr(cfg, f.name, val)
-        return cfg
-
-    def to_persist_dict(self) -> dict:
-        """转为可持久化的 dict（排除 glossary 等运行时字段）。"""
-        d = asdict(self)
-        d.pop("glossary", None)
-        return d
-
 
 # ------------------------------------------------------------------ #
-#  兼容层：提供 DEFAULT_CONFIG 供旧代码引用
+#  默认配置 dict（供 load_config 深拷贝使用）
 # ------------------------------------------------------------------ #
 
 DEFAULT_CONFIG: dict = asdict(TramConfig())

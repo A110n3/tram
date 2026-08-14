@@ -90,3 +90,74 @@ def test_atomic_write_no_partial_file(tmp_path):
     finally:
         cfg.CONFIG_DIR = orig_dir
         cfg.CONFIG_FILE = orig_file
+
+
+def test_load_config_coerces_string_numbers():
+    """手动编辑写入字符串类型的数值字段时，load_config 强制转换。"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as tmp:
+        json.dump({
+            "backend": {
+                "temperature": "0.5",
+                "max_tokens": "4096",
+                "timeout": "120",
+                "use_system_role": "false",
+            },
+            "translation": {
+                "chunk_chars": "512",
+            },
+            "selection": {
+                "enabled": "true",
+                "min_chars": "3",
+                "auto_hide_ms": "5000",
+            },
+        }, tmp)
+        path = tmp.name
+
+    orig = cfg.CONFIG_FILE
+    cfg.CONFIG_FILE = Path(path)
+    try:
+        result = load_config()
+        assert result["backend"]["temperature"] == 0.5
+        assert isinstance(result["backend"]["temperature"], float)
+        assert result["backend"]["max_tokens"] == 4096
+        assert isinstance(result["backend"]["max_tokens"], int)
+        assert result["backend"]["timeout"] == 120
+        assert result["backend"]["use_system_role"] is False
+        assert result["translation"]["chunk_chars"] == 512
+        assert result["selection"]["enabled"] is True
+        assert result["selection"]["min_chars"] == 3
+        assert result["selection"]["auto_hide_ms"] == 5000
+    finally:
+        cfg.CONFIG_FILE = orig
+        os.unlink(path)
+
+
+def test_load_config_coerces_bad_values_fallback():
+    """无法转换的值回退到默认，不崩溃。"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as tmp:
+        json.dump({
+            "backend": {
+                "temperature": "not_a_number",
+                "max_tokens": None,
+            },
+            "translation": {
+                "chunk_chars": [1, 2, 3],
+            },
+        }, tmp)
+        path = tmp.name
+
+    orig = cfg.CONFIG_FILE
+    cfg.CONFIG_FILE = Path(path)
+    try:
+        result = load_config()
+        # 回退到默认值
+        assert result["backend"]["temperature"] == 0.2
+        assert result["backend"]["max_tokens"] == 2048
+        assert result["translation"]["chunk_chars"] == 2000
+    finally:
+        cfg.CONFIG_FILE = orig
+        os.unlink(path)

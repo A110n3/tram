@@ -33,6 +33,17 @@ class BackendError(Exception):
         self.status_code = status_code
 
 
+class StreamCancelled(Exception):
+    """流式请求被主动取消（cancel/close）。
+
+    与 BackendError 区分：取消不应触发重试，需要立刻穿透分块循环
+    终止整个翻译任务。
+    """
+
+    def __init__(self) -> None:
+        super().__init__("翻译请求被取消")
+
+
 class OpenAIBackend:
     def __init__(
         self,
@@ -58,6 +69,18 @@ class OpenAIBackend:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+    def _ensure_client(self) -> httpx.Client:
+        """返回可用的 httpx 客户端；被 cancel/close 关闭后自动重建。
+
+        cancel() 通过关闭连接来中断阻塞中的请求，之后后端对象
+        仍需可复用（划词翻译共享同一实例），故按需重建。
+        """
+        if self._client.is_closed:
+            self._client = httpx.Client(
+                base_url=self.base_url, timeout=self.timeout, trust_env=False
+            )
+        return self._client
 
     def chat(
         self,
@@ -97,7 +120,7 @@ class OpenAIBackend:
             "stream": True,
         }
         try:
-            with self._client.stream(
+            with self._ensure_client().stream(
                 "POST", "/chat/completions", json=payload, headers=self._headers()
             ) as resp:
                 if resp.status_code >= 400:
@@ -108,10 +131,10 @@ class OpenAIBackend:
                         status_code=resp.status_code,
                     )
                 for line in resp.iter_lines():
-                    # 取消检查：close() 设置事件后立即中断
+                    # 取消检查：cancel() 设置事件后立即中断
                     if self._cancel_event.is_set():
                         logger.debug("流式请求被取消")
-                        return
+                        raise StreamCancelled()
                     if not line or not line.startswith("data:"):
                         continue
                     data = line[len("data:"):].strip()
@@ -127,12 +150,56 @@ class OpenAIBackend:
                         on_token(token)
         except httpx.HTTPError as e:
             if self._cancel_event.is_set():
-                return  # 取消导致的网络错误，静默
+                raise StreamCancelled() from e  # 取消导致的网络错误
             raise BackendError(f"无法连接后端 {self.base_url}: {e}") from e
 
+    def list_models(self) -> list[str]:
+        """获取后端可用模型列表（OpenAI 兼容 GET /models）。
+
+        响应格式：{"object": "list", "data": [{"id": "...", ...}, ...]}
+        返回去重后的模型 id 列表（保持后端返回顺序）。
+        """
+        try:
+            resp = self._ensure_client().get("/models", headers=self._headers())
+        except httpx.HTTPError as e:
+            raise BackendError(f"无法连接后端 {self.base_url}: {e}") from e
+        if resp.status_code >= 400:
+            body = resp.text.strip()[:500] or "（无响应体）"
+            raise BackendError(
+                f"获取模型列表失败，后端返回 {resp.status_code}: {body}",
+                status_code=resp.status_code,
+            )
+        try:
+            obj = resp.json()
+        except ValueError as e:  # json.JSONDecodeError 是 ValueError 子类
+            raise BackendError("获取模型列表失败：响应不是有效 JSON") from e
+        items = obj.get("data") if isinstance(obj, dict) else None
+        if not isinstance(items, list):
+            raise BackendError(
+                "获取模型列表失败：响应缺少 data 列表"
+                "（后端未实现 OpenAI 兼容 /models 接口）"
+            )
+        models: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            mid = item.get("id")
+            if isinstance(mid, str) and mid.strip() and mid not in models:
+                models.append(mid)
+        return models
+
     def cancel(self) -> None:
-        """中断进行中的流式请求。下一次 chat_stream 前会自动清除。"""
-        self._cancel_event.set()
+        """中断进行中的流式请求，并保证后端对象之后仍可复用。
+
+        仅靠 _cancel_event 无法打断阻塞在套接字 recv 上的线程（后端
+        加载模型时请求会长时间无响应），必须关闭底层连接让阻塞的
+        读取立刻抛错退出。下一次 chat_stream 会通过 _ensure_client
+        重建连接，cancel_event 在每次请求开始时清除。
+
+        实现等同 close()：cancel 语义强调"中断后可复用"，
+        close 语义强调"用完关闭"，两者行为一致。
+        """
+        self.close()
 
     def close(self) -> None:
         """关闭底层连接，中断进行中的请求。"""
@@ -141,6 +208,13 @@ class OpenAIBackend:
             self._client.close()
         except Exception:
             logger.debug("关闭 httpx client 时异常", exc_info=True)
+
+    # context manager 支持，简化 try/finally/close 模式
+    def __enter__(self) -> OpenAIBackend:
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
 
 
 def test_connection(
@@ -157,8 +231,11 @@ def test_connection(
         target_lang="中文（简体）",
         merge_system=not use_system_role,
     )
-    backend = OpenAIBackend(base_url, api_key, model, timeout=30)
-    try:
+    with OpenAIBackend(base_url, api_key, model, timeout=30) as backend:
         return backend.chat(messages, temperature=0.0, max_tokens=8)
-    finally:
-        backend.close()
+
+
+def fetch_models(base_url: str, api_key: str = "", timeout: int = 15) -> list[str]:
+    """获取后端可用模型列表（OpenAI 兼容 GET /models）。"""
+    with OpenAIBackend(base_url, api_key, timeout=timeout) as backend:
+        return backend.list_models()

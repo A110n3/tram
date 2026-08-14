@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 APP_NAME = "Tram Translator"
+
+logger = logging.getLogger(__name__)
 
 CONFIG_DIR = Path(os.path.expanduser("~")) / ".tram"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -70,6 +73,59 @@ class TramConfig:
 DEFAULT_CONFIG: dict = asdict(TramConfig())
 DEFAULT_CONFIG.pop("glossary", None)
 
+# 已知数值/布尔字段的类型强制转换表，防止手动编辑 config.json
+# 时写入错误类型导致后续运行时崩溃
+_TYPE_COERCIONS: dict[str, dict[str, type]] = {
+    "backend": {
+        "temperature": float,
+        "max_tokens": int,
+        "timeout": int,
+        "use_system_role": bool,
+    },
+    "translation": {
+        "chunk_chars": int,
+    },
+    "selection": {
+        "enabled": bool,
+        "min_chars": int,
+        "auto_hide_ms": int,
+    },
+}
+
+
+def _coerce_types(cfg: dict) -> dict:
+    """对已知的数值/布尔字段做类型强制转换。
+
+    手动编辑 config.json 可能写入字符串类型的数值（如 "chunk_chars": "2000"），
+    不转换会在后续 int()/float() 调用时崩溃。此处统一兜底。
+    """
+    for section, fields in _TYPE_COERCIONS.items():
+        if section not in cfg or not isinstance(cfg[section], dict):
+            continue
+        for key, typ in fields.items():
+            val = cfg[section].get(key)
+            if val is None:
+                # 显式 null 视为缺失，回退默认值（这些字段默认值均非 None）
+                cfg[section][key] = DEFAULT_CONFIG.get(section, {}).get(key)
+                continue
+            try:
+                if typ is bool:
+                    # bool("false") == True，需特殊处理
+                    if isinstance(val, str):
+                        cfg[section][key] = val.strip().lower() in ("true", "1", "yes")
+                    else:
+                        cfg[section][key] = bool(val)
+                elif typ is int:
+                    cfg[section][key] = int(val)
+                elif typ is float:
+                    cfg[section][key] = float(val)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "配置项 %s.%s 值 %r 类型转换失败，保留默认", section, key, val
+                )
+                cfg[section][key] = DEFAULT_CONFIG.get(section, {}).get(key)
+    return cfg
+
 
 # ------------------------------------------------------------------ #
 #  持久化
@@ -109,7 +165,7 @@ def load_config() -> dict:
                         cfg[section] = values
     except (json.JSONDecodeError, OSError):
         pass  # 配置损坏时静默回退到默认
-    return cfg
+    return _coerce_types(cfg)
 
 
 def save_config(cfg: dict) -> None:

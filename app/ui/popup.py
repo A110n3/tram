@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer
+from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QGuiApplication
 from PyQt6.QtWidgets import (
     QApplication,
@@ -25,10 +25,19 @@ POPUP_MAX_HEIGHT = 360
 POPUP_MARGIN = 12
 # 高度计算时为滚动预留的宽度，保证滚动条出现时文本宽度不变、不重排
 _SCROLLBAR_RESERVE = 10
+# 窗口装饰高度：上边距(10) + 下边距(12) + 间距(6) + 标题栏(20)
+_CHROME_HEIGHT = 48
+# 最小窗口高度，避免空内容时坍缩
+_MIN_HEIGHT = 60
+# 等待首个 token 超过此时长后，提示"后端可能在加载模型"
+_SLOW_HINT_MS = 8000
 
 
 class TranslationPopup(QFrame):
     """无边框置顶悬浮窗，流式展示译文，长内容滚动显示。"""
+
+    # 用户点 ✕：请求取消当前翻译（隐藏窗口由本类自行处理）
+    close_requested = pyqtSignal()
 
     def __init__(self, auto_hide_ms: int = 0, parent=None):
         super().__init__(
@@ -44,6 +53,11 @@ class TranslationPopup(QFrame):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.hide)
+
+        # 慢响应提示：翻译开始后长时间无 token 时改提示文案
+        self._slow_hint_timer = QTimer(self)
+        self._slow_hint_timer.setSingleShot(True)
+        self._slow_hint_timer.timeout.connect(self._show_slow_hint)
 
         self._build_ui()
         self._apply_style()
@@ -65,7 +79,7 @@ class TranslationPopup(QFrame):
         close_btn.setFlat(True)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setObjectName("TramClose")
-        close_btn.clicked.connect(self.hide)
+        close_btn.clicked.connect(self._on_close_clicked)
 
         header.addStretch()
         header.addWidget(close_btn)
@@ -129,14 +143,18 @@ class TranslationPopup(QFrame):
         self._target_label.setText("翻译中…")
         self._scroll_to_top()
         self._show()
+        # 后端加载模型等场景首个 token 会很慢，超时给出提示避免像卡死
+        self._slow_hint_timer.start(_SLOW_HINT_MS)
 
     def append_token(self, token: str) -> None:
         """流式追加译文。仅当用户未向上翻看时自动跟随到底部。"""
+        self._slow_hint_timer.stop()
         bar = self._vbar
         stick_to_bottom = bar.value() >= bar.maximum() - 4
 
         cur = self._target_label.text()
-        if cur == "翻译中…":
+        # startswith：兼容"翻译中…"与慢响应提示文案
+        if cur.startswith("翻译中…"):
             cur = ""
         self._target_label.setText(cur + token)
         self._adjust_height()
@@ -145,6 +163,7 @@ class TranslationPopup(QFrame):
             QTimer.singleShot(0, self._scroll_to_bottom)
 
     def set_translation(self, text: str) -> None:
+        self._slow_hint_timer.stop()
         bar = self._vbar
         stick_to_bottom = bar.value() >= bar.maximum() - 4
         self._target_label.setText(text)
@@ -153,11 +172,25 @@ class TranslationPopup(QFrame):
             QTimer.singleShot(0, self._scroll_to_bottom)
 
     def show_error(self, message: str) -> None:
+        self._slow_hint_timer.stop()
         self._target_label.setText(f"❌ {message}")
         self._target_label.setStyleSheet("color: #e0a3a3;")
         self._scroll_to_top()
         self._adjust_height()
         self._show()
+
+    def _show_slow_hint(self) -> None:
+        """等待首个 token 超时：提示后端可能在加载模型。"""
+        if not self._target_label.text().startswith("翻译中…"):
+            return  # 已有译文/报错则不覆盖
+        self._target_label.setText("翻译中…（等待后端响应，可能在加载模型）")
+        self._adjust_height()
+
+    def _on_close_clicked(self) -> None:
+        """✕：通知外部取消翻译，并隐藏窗口。"""
+        self._slow_hint_timer.stop()
+        self.close_requested.emit()
+        self.hide()
 
     def show_capturing(self) -> None:
         """热键触发后立即展示最小窗口，提示"正在捕获"。
@@ -180,6 +213,7 @@ class TranslationPopup(QFrame):
 
     def fade_out(self) -> None:
         """捕获失败时短暂提示后自动隐藏。"""
+        self._slow_hint_timer.stop()
         self._target_label.setText("未检测到选中文本")
         self._target_label.setStyleSheet("color: #9aa0ac;")
         self._scroll_to_top()
@@ -211,9 +245,9 @@ class TranslationPopup(QFrame):
 
         # Chrome: top margin(10) + bottom margin(12) + spacing(6)
         # + header(close btn 20)
-        chrome = 48
+        chrome = _CHROME_HEIGHT
         total = tgt_h + chrome
-        self.setFixedHeight(min(max(total, 60), POPUP_MAX_HEIGHT))
+        self.setFixedHeight(min(max(total, _MIN_HEIGHT), POPUP_MAX_HEIGHT))
 
     def _scroll_to_top(self) -> None:
         self._vbar.setValue(0)
@@ -243,6 +277,7 @@ class TranslationPopup(QFrame):
     # ---------- 失焦隐藏 ----------
     def changeEvent(self, event) -> None:
         if self._auto_hide_ms <= 0 and event.type() == QEvent.Type.WindowDeactivate:
+            self._slow_hint_timer.stop()
             self.hide()
         super().changeEvent(event)
 

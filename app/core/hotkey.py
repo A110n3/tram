@@ -18,6 +18,7 @@ parse_hotkey 为纯逻辑，不依赖 Win32，可单独单测。
 from __future__ import annotations
 
 import logging
+import threading
 
 import pywintypes
 import win32event
@@ -174,8 +175,6 @@ def test_hotkey_available(spec: str, timeout_ms: float = 300) -> tuple[bool, str
     返回 (True, "") 或 (False, 错误消息)。
     注册成功后立即释放，不干扰实际热键监听。
     """
-    import threading as _threading
-
     try:
         modifiers, vk = parse_hotkey(spec)
     except HotkeyError as e:
@@ -197,8 +196,10 @@ def test_hotkey_available(spec: str, timeout_ms: float = 300) -> tuple[bool, str
             logger.debug("热键测试异常", exc_info=True)
             result["error"] = f"热键 {spec} 注册失败，请更换其他组合键"
 
-    t = _threading.Thread(target=_tester, daemon=True)
+    t = threading.Thread(target=_tester, daemon=True)
     t.start()
     t.join(timeout_ms / 1000.0)
 
+    if t.is_alive():
+        return False, f"热键 {spec} 检测超时，请重试或更换组合键"
     return result["ok"], result["error"]

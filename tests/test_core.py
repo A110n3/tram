@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.backend import BackendError
+from app.core.backend import StreamCancelled
 from app.core.chunking import split_text
 from app.core.glossary import to_prompt_block
 from app.core.prompts import build_messages
@@ -242,6 +243,90 @@ def test_parse_hotkey_invalid_mod():
         assert False, "应抛 HotkeyError"
     except HotkeyError:
         pass
+
+
+def test_translate_context_uses_translation_not_original():
+    """多块翻译时，上下文应传入前一块的译文（而非原文）。
+
+    回归 bug：prev_chunk = chunk 传入了原文，导致 LLM 看到的
+    "Previously translated content" 实际是未翻译的原文，
+    无法保持术语/风格一致。
+    """
+
+    class _CaptureBackend:
+        def __init__(self):
+            self.messages_list = []
+            self.call_count = 0
+
+        def chat_stream(self, messages, temperature=0.2, max_tokens=2048, on_token=None):
+            self.call_count += 1
+            self.messages_list.append(messages)
+            if on_token:
+                on_token(f"译文{self.call_count}")
+
+    backend = _CaptureBackend()
+    # 两段超长文本，确保分成两块
+    text = "第一段内容。" * 400 + "\n\n" + "第二段内容。" * 400
+    config = {"backend": {}, "translation": {"chunk_chars": 200}}
+    Translator(backend, config).translate(text)
+
+    assert len(backend.messages_list) == 2
+    # 第二块的 context_block 应包含译文（"译文1"），而非原文（"第一段内容"）
+    second_messages = backend.messages_list[1]
+    system_content = second_messages[0]["content"]
+    assert "译文1" in system_content
+    assert "第一段内容" not in system_content
+
+
+def test_translate_join_preserves_paragraph_breaks():
+    """多块翻译结果用 \\n\\n 连接，保留段落分隔。
+
+    回归 bug：用 \\n 连接会丢失块间段落分隔。
+    """
+
+    class _StubBackend:
+        def __init__(self):
+            self.call_count = 0
+
+        def chat_stream(self, messages, temperature=0.2, max_tokens=2048, on_token=None):
+            self.call_count += 1
+            if on_token:
+                on_token(f"块{self.call_count}")
+
+    backend = _StubBackend()
+    text = "第一段。" * 400 + "\n\n" + "第二段。" * 400
+    config = {"backend": {}, "translation": {"chunk_chars": 200}}
+    result = Translator(backend, config).translate(text)
+    assert result == "块1\n\n块2"
+
+
+def test_translate_propagates_stream_cancelled():
+    """StreamCancelled 应穿透 translator 的重试循环，不触发重试。
+
+    回归防护：取消异常非 BackendError 子类，_translate_chunk 不捕获它，
+    直接传播到调用方。如果将来误加 except Exception 会吞掉取消信号。
+    """
+
+    class _CancelBackend:
+        def __init__(self):
+            self.call_count = 0
+
+        def chat_stream(self, messages, temperature=0.2, max_tokens=2048, on_token=None):
+            self.call_count += 1
+            raise StreamCancelled()
+
+    backend = _CancelBackend()
+    translator = Translator(backend, {"backend": {}})
+
+    raised = False
+    try:
+        translator.translate("hello world")
+    except StreamCancelled:
+        raised = True
+
+    assert raised, "StreamCancelled 应穿透 Translator.translate"
+    # 只调用了一次：取消不应触发重试
+    assert backend.call_count == 1
 
 
 if __name__ == "__main__":

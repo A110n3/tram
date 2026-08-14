@@ -14,7 +14,7 @@ import logging
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from ..core.backend import BackendError, test_connection
+from ..core.backend import BackendError, fetch_models, test_connection
 from ..core.translator import Translator
 
 logger = logging.getLogger(__name__)
@@ -103,4 +103,29 @@ class TestConnectionWorker(QThread):
             self.err.emit(str(e))
         except Exception as e:
             logger.warning("测试连接异常", exc_info=True)
+            self.err.emit(str(e))
+
+
+class ListModelsWorker(QThread):
+    """后台执行 list_models（GET /models），避免阻塞 UI。
+
+    设置对话框的「获取模型」按钮使用。
+    """
+
+    ok = pyqtSignal(list)
+    err = pyqtSignal(str)
+
+    def __init__(self, base_url: str, api_key: str, parent=None):
+        super().__init__(parent)
+        self._base_url = base_url
+        self._api_key = api_key
+
+    def run(self) -> None:
+        try:
+            models = fetch_models(self._base_url, self._api_key)
+            self.ok.emit(models)
+        except BackendError as e:
+            self.err.emit(str(e))
+        except Exception as e:
+            logger.warning("获取模型列表异常", exc_info=True)
             self.err.emit(str(e))

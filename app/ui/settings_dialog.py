@@ -1,7 +1,8 @@
-"""设置对话框：后端连接配置 + 翻译参数 + 连接测试。"""
+"""设置对话框：后端连接配置 + 翻译参数 + 连接测试 + 一键获取模型。"""
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 from PyQt6.QtCore import Qt
@@ -27,7 +28,8 @@ from PyQt6.QtWidgets import (
 
 from ..core.hotkey import HotkeyError, parse_hotkey, test_hotkey_available
 from ..core.prompts import SOURCE_LANGS, TARGET_LANGS
-from .worker import TestConnectionWorker
+from .worker import ListModelsWorker, TestConnectionWorker
+from .worker_util import track_worker
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,7 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("设置")
         self.setMinimumWidth(460)
         self._test_worker: TestConnectionWorker | None = None
+        self._fetch_worker: ListModelsWorker | None = None
         self._build_ui()
         self._load_values()
 
@@ -66,8 +69,21 @@ class SettingsDialog(QDialog):
         self.base_url_edit = QLineEdit()
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.model_edit = QLineEdit()
-        self.model_edit.setPlaceholderText("例如 qwen2.5:7b / llama3.1:8b")
+        # 可编辑下拉框：既能从后端拉取模型列表选择，也支持手动输入
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model_combo.setPlaceholderText("例如 qwen2.5:7b / llama3.1:8b")
+        self.fetch_btn = QPushButton("获取模型")
+        self.fetch_btn.setToolTip(
+            "调用后端 OpenAI 兼容 /models 接口，一键获取可用模型列表"
+        )
+        self.fetch_btn.clicked.connect(self._on_fetch_models)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self.model_combo, 1)
+        model_row.addWidget(self.fetch_btn)
+        self.fetch_result = QLabel("")
+        self.fetch_result.setWordWrap(True)
 
         self.use_system_role_cb = QCheckBox("使用 system 消息")
         self.use_system_role_cb.setToolTip(
@@ -79,7 +95,8 @@ class SettingsDialog(QDialog):
         bf.addRow("后端预设", self.preset_combo)
         bf.addRow("Base URL", self.base_url_edit)
         bf.addRow("API Key", self.api_key_edit)
-        bf.addRow("模型名称", self.model_edit)
+        bf.addRow("模型名称", model_row)
+        bf.addRow("", self.fetch_result)
         bf.addRow("", self.use_system_role_cb)
 
         test_row = QHBoxLayout()
@@ -173,7 +190,7 @@ class SettingsDialog(QDialog):
             self.preset_combo.setCurrentIndex(idx)
         self.base_url_edit.setText(url)
         self.api_key_edit.setText(b.get("api_key", ""))
-        self.model_edit.setText(b.get("model", ""))
+        self.model_combo.setCurrentText(b.get("model", ""))
         self.use_system_role_cb.setChecked(bool(b.get("use_system_role", True)))
         self.temperature_spin.setValue(float(b.get("temperature", 0.2)))
         self.max_tokens_spin.setValue(int(b.get("max_tokens", 2048)))
@@ -206,7 +223,7 @@ class SettingsDialog(QDialog):
             self.base_url_edit.setText(url)
 
     def _on_save(self) -> None:
-        if not self.model_edit.text().strip():
+        if not self.model_combo.currentText().strip():
             QMessageBox.warning(self, "提示", "请填写模型名称。")
             return
 
@@ -237,25 +254,26 @@ class SettingsDialog(QDialog):
                 self.selection_hotkey_edit.setFocus()
                 return
 
-        self._config["backend"].update(
+        self._config.setdefault("backend", {}).update(
             base_url=self.base_url_edit.text().strip(),
             api_key=self.api_key_edit.text().strip(),
-            model=self.model_edit.text().strip(),
+            model=self.model_combo.currentText().strip(),
             temperature=self.temperature_spin.value(),
             max_tokens=self.max_tokens_spin.value(),
             use_system_role=self.use_system_role_cb.isChecked(),
         )
-        self._config["translation"].update(
+        self._config.setdefault("translation", {}).update(
             source_lang=self.source_lang_combo.currentText(),
             target_lang=self.target_lang_combo.currentText(),
             chunk_chars=self.chunk_spin.value(),
             style=self.style_combo.currentText(),
         )
-        self._config.setdefault("selection", {}).update(
+        sel = self._config.setdefault("selection", {})
+        sel.update(
             enabled=self.selection_enabled_cb.isChecked(),
             hotkey=hotkey_spec,
             min_chars=self.selection_min_chars_spin.value(),
-            auto_hide_ms=self._config.get("selection", {}).get("auto_hide_ms", 0),
+            auto_hide_ms=sel.get("auto_hide_ms", 0),
         )
         self.accept()
 
@@ -284,7 +302,7 @@ class SettingsDialog(QDialog):
 
     def _on_test(self) -> None:
         url = self.base_url_edit.text().strip()
-        model = self.model_edit.text().strip()
+        model = self.model_combo.currentText().strip()
         if not url or not model:
             self.test_result.setText("请先填写 Base URL 和模型名称。")
             self.test_result.setStyleSheet("color: #c0392b;")
@@ -302,12 +320,13 @@ class SettingsDialog(QDialog):
             self.api_key_edit.text().strip(),
             model,
             use_system_role=self.use_system_role_cb.isChecked(),
+            parent=self,
         )
         self._test_worker.ok.connect(self._on_test_ok)
         self._test_worker.err.connect(self._on_test_err)
         self._test_worker.finished.connect(self._on_test_finished)
-        # 线程结束后自动清理，避免 QThread destroyed while running
-        self._test_worker.finished.connect(self._test_worker.deleteLater)
+        # 线程结束：先清 Python 引用、再删 C++ 对象，避免残留僵尸包装器
+        track_worker(self, "_test_worker", self._test_worker)
         self._test_worker.start()
 
     def _on_test_ok(self, reply: str) -> None:
@@ -325,22 +344,104 @@ class SettingsDialog(QDialog):
 
     def _cleanup_test_worker(self) -> None:
         """安全清理旧测试线程：等待退出 + 断开信号 + deleteLater。"""
-        w = self._test_worker
+        self._shutdown_worker(self._test_worker, "测试连接")
+        self._test_worker = None
+
+    # ---------- 获取模型 ----------
+    def _on_fetch_models(self) -> None:
+        url = self.base_url_edit.text().strip()
+        if not url:
+            self.fetch_result.setText("请先填写 Base URL。")
+            self.fetch_result.setStyleSheet("color: #c0392b;")
+            return
+
+        # 清理旧 worker（等待退出 + deleteLater）
+        self._cleanup_fetch_worker()
+
+        self.fetch_btn.setEnabled(False)
+        self.fetch_result.setText("获取中…")
+        self.fetch_result.setStyleSheet("color: #888;")
+        # 后台线程执行，避免后端慢时冻结对话框
+        self._fetch_worker = ListModelsWorker(
+            url, self.api_key_edit.text().strip(), parent=self
+        )
+        self._fetch_worker.ok.connect(self._on_fetch_ok)
+        self._fetch_worker.err.connect(self._on_fetch_err)
+        self._fetch_worker.finished.connect(self._on_fetch_finished)
+        # 线程结束：先清 Python 引用、再删 C++ 对象，避免残留僵尸包装器
+        track_worker(self, "_fetch_worker", self._fetch_worker)
+        self._fetch_worker.start()
+
+    def _on_fetch_ok(self, models: list[str]) -> None:
+        if not models:
+            self.fetch_result.setText(
+                "⚠ 后端未返回任何模型，请手动填写模型名称。"
+            )
+            self.fetch_result.setStyleSheet("color: #e67e22;")
+            return
+
+        current = self.model_combo.currentText().strip()
+        self.model_combo.clear()
+        self.model_combo.addItems(models)
+        if current:
+            idx = self.model_combo.findText(current)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            else:
+                # 已填模型不在列表中，保留手动输入的内容
+                self.model_combo.setCurrentText(current)
+        self.fetch_result.setText(f"✅ 获取到 {len(models)} 个模型")
+        self.fetch_result.setStyleSheet("color: #27ae60;")
+
+    def _on_fetch_err(self, message: str) -> None:
+        self.fetch_result.setText(f"❌ {message}（可手动填写模型名称）")
+        self.fetch_result.setStyleSheet("color: #c0392b;")
+
+    def _on_fetch_finished(self) -> None:
+        self.fetch_btn.setEnabled(True)
+
+    def _cleanup_fetch_worker(self) -> None:
+        """安全清理旧获取模型线程：等待退出 + 断开信号 + deleteLater。"""
+        self._shutdown_worker(self._fetch_worker, "获取模型")
+        self._fetch_worker = None
+
+    @staticmethod
+    def _shutdown_worker(
+        w: TestConnectionWorker | ListModelsWorker | None, name: str
+    ) -> None:
+        """等待后台线程退出并断开信号，防止 QThread 析构时仍在运行。
+
+        对"僵尸"包装器（C++ 对象已被 deleteLater 删除）免疫：
+        任何 RuntimeError 直接静默跳过。
+
+        线程超时未退出时：仅断开结果信号（ok/err），保留 finished
+        信号不动，让线程自然结束后由 finished -> deleteLater 清理。
+        避免对运行中的 QThread 调用 deleteLater 导致崩溃。
+        """
         if w is None:
             return
-        if w.isRunning() and not w.wait(3000):
-            logger.warning("测试连接线程 3s 未退出，放弃等待")
         try:
+            if w.isRunning() and not w.wait(3000):
+                logger.warning("%s线程 3s 未退出，放弃等待", name)
+                # 线程仍在运行：仅断开结果信号，不 deleteLater
+                # finished 信号保留，线程结束后自动 _forget + deleteLater
+                with contextlib.suppress(TypeError, RuntimeError):
+                    w.ok.disconnect()
+                    w.err.disconnect()
+                return
+        except RuntimeError:
+            return  # C++ 对象已删除，无需清理
+        # 线程已结束：安全断开所有信号并调度删除
+        with contextlib.suppress(TypeError, RuntimeError):
             w.ok.disconnect()
             w.err.disconnect()
             w.finished.disconnect()
-        except (TypeError, RuntimeError):
-            pass
         # deleteLater 由 finished 信号触发；若线程已结束则立即调度
-        w.deleteLater()
-        self._test_worker = None
+        with contextlib.suppress(RuntimeError):
+            w.deleteLater()
 
     def closeEvent(self, event) -> None:
-        # 安全清理测试线程，避免 QThread 析构时仍在运行
+        # 安全清理后台线程，避免 QThread 析构时仍在运行
         self._cleanup_test_worker()
+        self._cleanup_fetch_worker()
         super().closeEvent(event)

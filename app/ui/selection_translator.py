@@ -22,6 +22,7 @@ from ..core.selection import grab_selection
 from ..core.translator import Translator
 from .popup import TranslationPopup
 from .worker import TranslateWorker
+from .worker_util import track_worker
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,8 @@ class SelectionTranslator(QObject):
         sel_cfg = self._config.get("selection", {})
         auto_hide = sel_cfg.get("auto_hide_ms", 0)
         self._popup = TranslationPopup(auto_hide_ms=auto_hide)
+        # 用户点 ✕ 时真正取消翻译：中断请求、释放被占用的后端
+        self._popup.close_requested.connect(self._cancel_worker)
         # 先以极简窗告知"正在捕获"，定位在鼠标旁
         self._popup.show_capturing()
 
@@ -164,21 +167,31 @@ class SelectionTranslator(QObject):
         self._worker.succeeded.connect(self._on_selection_success)
         self._worker.failed.connect(self._on_selection_failed)
         self._worker.retry.connect(self._on_retry)
+        # 线程结束：先清 Python 引用、再删 C++ 对象。引用必须及时清空，
+        # 否则 deleteLater 删掉 C++ 对象后，残留的包装器成为"僵尸"，
+        # 后续任何调用都会 RuntimeError（旧版在槽里直接导致 qFatal 闪退）
+        track_worker(self, "_worker", self._worker)
         self._worker.start()
 
     def _cancel_worker(self) -> None:
-        """取消进行中的翻译，等待线程退出，断开所有信号。"""
-        if self._worker:
-            self._worker.request_stop()
-            self._worker.wait(2000)  # 等待线程退出，避免资源泄漏
-            try:
-                self._worker.token.disconnect()
-                self._worker.succeeded.disconnect()
-                self._worker.failed.disconnect()
-                self._worker.retry.disconnect()
-            except TypeError:
-                pass
-        self._worker = None
+        """取消进行中的翻译，等待线程退出，断开所有信号。
+
+        对"僵尸"worker（C++ 对象已被 deleteLater 删除）全程免疫。
+        """
+        w = self._worker
+        self._worker = None  # 先清引用：即使后续抛异常也不会残留僵尸
+        if w is None:
+            return
+        try:
+            w.request_stop()
+            w.wait(2000)  # 等待线程退出，避免资源泄漏
+        except RuntimeError:
+            return  # C++ 对象已删除，无需清理
+        try:
+            for sig in (w.token, w.succeeded, w.failed, w.retry):
+                sig.disconnect()
+        except (TypeError, RuntimeError):
+            pass
 
     # ---------- 翻译回调 ----------
     def _on_selection_success(self, result: str) -> None:

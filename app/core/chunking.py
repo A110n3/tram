@@ -36,26 +36,28 @@ def _split_long_paragraph(text: str, max_chars: int) -> list[str]:
 
 
 def split_text(text: str, max_chars: int = 2000) -> list[str]:
-    """把文本切成若干不超过 max_chars 的块。
+    """把文本切成若干块，以段落为基本单元。
 
-    以空行分隔的段落为基本单元，贪婪合并；单段超长则按句子切。
+    - 多段输入：段落是原子单元，只贪婪合并、不按句拆分，保证每个段落
+      恰好对应一个块。这样译文按 ``\\n\\n`` 拼接时段落边界不会被拆开，
+      避免在段落中间引入多余的空行。
+    - 单段超长输入：没有段落边界可依托，退而按句子切，避免整块超出
+      上下文上限。
     """
     if not text.strip():
         return []
     max_chars = max(256, int(max_chars))
 
     paragraphs = [p.strip() for p in _PARAGRAPH_SPLIT.split(text) if p.strip()]
+
+    # 唯一的段落且超长：只能按句子切
+    if len(paragraphs) == 1 and len(paragraphs[0]) > max_chars:
+        return _split_long_paragraph(paragraphs[0], max_chars)
+
+    # 段落为原子单元，贪婪合并到接近 max_chars
     chunks: list[str] = []
     buf = ""
     for para in paragraphs:
-        if len(para) > max_chars:
-            # 先落盘已有的缓冲区
-            if buf:
-                chunks.append(buf)
-                buf = ""
-            for piece in _split_long_paragraph(para, max_chars):
-                chunks.append(piece)
-            continue
         if buf and len(buf) + len(para) + 2 > max_chars:
             chunks.append(buf)
             buf = para

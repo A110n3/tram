@@ -11,7 +11,7 @@ import logging
 import time
 from collections.abc import Callable
 
-from .backend import BackendError, OpenAIBackend
+from .backend import BackendError, OpenAIBackend, StreamCancelled
 from .chunking import split_text
 from .glossary import to_prompt_block
 from .prompts import build_messages
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # 4xx 状态码视为永久错误，不重试；5xx 视为瞬态错误，可重试
 _PERMANENT_RANGE = (400, 500)  # [400, 500)
 _MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.5  # 退避基数：attempt × 1.5s（1.5s / 3.0s）
 
 
 def _is_retryable(err: Exception) -> bool:
@@ -65,19 +66,19 @@ class Translator:
         total = len(chunks)
 
         full_result: list[str] = []
-        prev_chunk: str | None = None  # 前一块原文，用于上下文
+        prev_result: str | None = None  # 前一块译文，用于保持术语/风格一致
 
         for index, chunk in enumerate(chunks):
             if on_chunk:
                 on_chunk(index, total)
 
             context_block = ""
-            if prev_chunk is not None:
+            if prev_result:
                 # 块头使用英文：部分后端无法处理请求中的非 ASCII 字符
                 context_block = (
                     "Previously translated content for reference (keep terms,"
                     " tone and style consistent; do not retranslate it):\n"
-                    f"{prev_chunk}"
+                    f"{prev_result}"
                 )
 
             messages = build_messages(
@@ -94,19 +95,21 @@ class Translator:
                 messages, on_token=on_token, on_retry=on_retry
             )
             full_result.append(result)
-            prev_chunk = chunk
+            prev_result = result
 
-        return "\n".join(full_result)
+        return "\n\n".join(full_result)
 
     def _translate_chunk(
         self,
         messages: list[dict],
-        on_token,
+        on_token: Callable[[str], None] | None = None,
         on_retry: Callable[[], None] | None = None,
     ) -> str:
         """翻译单块，失败自动重试（最多 3 次，指数退避）。
 
         永久性错误（4xx）立即失败，不重试。
+        注意：StreamCancelled 非 BackendError 子类，不会被此处捕获，
+        直接穿透到调用方——确保取消时不触发重试、不继续后续块。
         """
         bcfg = self.config.get("backend", {})
         temperature = bcfg.get("temperature", 0.2)
@@ -125,7 +128,7 @@ class Translator:
                 if on_retry:
                     on_retry()
                 collected.clear()
-                delay = 1.5 * attempt  # 退避：1.5s / 3.0s
+                delay = _RETRY_BASE_DELAY * attempt  # 退避：1.5s / 3.0s
                 logger.info("翻译重试 #%d，等待 %.1fs", attempt, delay)
                 time.sleep(delay)
             try:

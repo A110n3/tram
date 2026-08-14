@@ -23,6 +23,7 @@ from .glossary_dialog import GlossaryDialog
 from .selection_translator import SelectionTranslator
 from .settings_dialog import SettingsDialog
 from .worker import TestConnectionWorker
+from .worker_util import track_worker
 
 
 class MainWindow(QMainWindow):
@@ -183,8 +184,8 @@ class MainWindow(QMainWindow):
         self._lang_test_worker = w
         w.ok.connect(self._on_lang_test_ok)
         w.err.connect(self._on_lang_test_err)
-        # 线程结束后自动清理，避免 QThread destroyed while running
-        w.finished.connect(w.deleteLater)
+        # 线程结束：先清 Python 引用、再删 C++ 对象，避免残留僵尸包装器
+        track_worker(self, "_lang_test_worker", w)
         w.start()
 
     def _drop_lang_test_worker(self) -> None:
@@ -281,9 +282,13 @@ class MainWindow(QMainWindow):
         self._quitting = True
         # 等待进行中的连接测试退出，避免 QThread 析构时仍在运行
         w = self._lang_test_worker
-        if w is not None and w.isRunning():
-            w.wait(2000)
         self._lang_test_worker = None
+        if w is not None:
+            try:
+                if w.isRunning():
+                    w.wait(2000)
+            except RuntimeError:
+                pass  # 僵尸包装器（C++ 对象已删除），无需处理
         self._selection_translator.shutdown()
         app = QApplication.instance()
         if app is not None:

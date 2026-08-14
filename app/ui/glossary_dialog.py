@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -19,6 +20,8 @@ from ..core import glossary as gs
 class GlossaryDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 在任务栏显示窗口，避免被其他窗口遮挡后无法呼出
+        self.setWindowFlags(Qt.WindowType.Window)
         self.setWindowTitle("术语表")
         self.resize(520, 400)
         self._build_ui()
@@ -65,6 +68,9 @@ class GlossaryDialog(QDialog):
         self.table.setItem(row, 0, QTableWidgetItem(""))
         self.table.setItem(row, 1, QTableWidgetItem(""))
         self.table.setCurrentCell(row, 0)
+        # 自动进入编辑状态，焦点直接指向原文输入框
+        self.table.setFocus()
+        self.table.editItem(self.table.item(row, 0))
 
     def _remove_selected(self) -> None:
         rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)

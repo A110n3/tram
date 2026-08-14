@@ -5,8 +5,8 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QCursor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..config import save_config
+from ..config import APP_VERSION, save_config
 from ..core.prompts import TARGET_LANGS
 from .glossary_dialog import GlossaryDialog
 from .selection_translator import SelectionTranslator
@@ -32,8 +32,12 @@ class MainWindow(QMainWindow):
         self._config = config
         self._quitting = False
 
-        self.setWindowTitle("Tram 划词翻译")
-        self.resize(320, 140)
+        # 对话框单例引用：防止从托盘重复打开
+        self._settings_dialog: SettingsDialog | None = None
+        self._glossary_dialog: GlossaryDialog | None = None
+
+        self.setWindowTitle("关于 Tram")
+        self.resize(380, 520)
         self._build_ui()
 
         # 划词翻译服务
@@ -47,6 +51,12 @@ class MainWindow(QMainWindow):
         # 托盘
         self._create_tray()
         self._apply_selection_config()
+
+        # 启动划词翻译（如果已启用），热键注册结果由 _on_hotkey_status 统一通知
+        if self._config.get("selection", {}).get("enabled", False):
+            self._selection_translator.start()
+        else:
+            self._notify("Tram 划词", "点击托盘图标开启划词翻译")
 
         # 启动后隐藏主窗口，仅托盘运行
         self.hide()
@@ -63,30 +73,115 @@ class MainWindow(QMainWindow):
         return action
 
     def _build_ui(self) -> None:
-        menubar = self.menuBar()
-        assert menubar is not None  # QMainWindow.menuBar() 总是存在
-        tools_menu = menubar.addMenu("工具")
-        assert tools_menu is not None
-        self._act(tools_menu.addAction("设置…"), self.open_settings)
-        self._act(tools_menu.addAction("术语表…"), self.open_glossary)
-
+        """构建「关于」信息页：应用图标、名称、版本、功能、技术信息。"""
         central = QWidget()
+        central.setObjectName("AboutPage")
         lay = QVBoxLayout(central)
-        lay.setContentsMargins(24, 16, 24, 16)
+        lay.setContentsMargins(28, 28, 28, 28)
+        lay.setSpacing(0)
 
-        title = QLabel("Tram 划词翻译")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #4a9eff;")
-        hint = QLabel("已在系统托盘运行\n右键托盘图标管理划词或打开设置")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setStyleSheet("color: #788090; font-size: 13px;")
+        # 应用图标
+        pixmap = self._make_tray_icon()
+        icon_label = QLabel()
+        icon_label.setPixmap(
+            pixmap.scaled(
+                64, 64,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        # 应用名
+        name_label = QLabel("Tram")
+        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_label.setStyleSheet(
+            "font-size: 24px; font-weight: bold; color: #4a9eff;"
+            " margin-top: 14px;"
+        )
+
+        # 版本
+        version_label = QLabel(f"v{APP_VERSION}")
+        version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        version_label.setStyleSheet(
+            "font-size: 13px; color: #788090; margin-top: 4px;"
+        )
+
+        # 一句话描述
+        desc_label = QLabel("离线划词翻译，接入本地大模型")
+        desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        desc_label.setStyleSheet(
+            "font-size: 14px; color: #c0c4cc; margin-top: 18px;"
+        )
+
+        # 分隔线
+        sep1 = self._make_separator()
+
+        # 功能列表
+        feat_title = QLabel("功能")
+        feat_title.setStyleSheet(
+            "font-size: 13px; font-weight: bold; color: #a0a8b4;"
+            " margin-bottom: 8px;"
+        )
+        features = [
+            "全局热键取词 — 选中文本按热键即译",
+            "流式悬浮窗 — 译文边生成边显示",
+            "系统托盘常驻 — 后台静默运行",
+            "多后端切换 — Ollama / LM Studio / vLLM",
+            "术语表 — 自定义专有名词映射",
+        ]
+
+        # 分隔线
+        sep2 = self._make_separator()
+
+        # 技术信息
+        tech_label = QLabel("技术栈：PyQt6 · httpx · OpenAI 兼容 API")
+        tech_label.setStyleSheet("font-size: 12px; color: #788090;")
+        license_label = QLabel("许可证：MIT")
+        license_label.setStyleSheet(
+            "font-size: 12px; color: #788090; margin-top: 4px;"
+        )
+        author_label = QLabel("作者：A110n3")
+        author_label.setStyleSheet(
+            "font-size: 12px; color: #788090; margin-top: 4px;"
+        )
+
+        # 组装
         lay.addStretch()
-        lay.addWidget(title)
-        lay.addSpacing(4)
-        lay.addWidget(hint)
+        lay.addWidget(icon_label)
+        lay.addWidget(name_label)
+        lay.addWidget(version_label)
+        lay.addWidget(desc_label)
+        lay.addWidget(sep1)
+        lay.addWidget(feat_title)
+        for feat in features:
+            fl = QLabel(f"  ·  {feat}")
+            fl.setStyleSheet(
+                "font-size: 13px; color: #c0c4cc; margin-bottom: 4px;"
+            )
+            lay.addWidget(fl)
+        lay.addWidget(sep2)
+        lay.addWidget(tech_label)
+        lay.addWidget(license_label)
+        lay.addWidget(author_label)
         lay.addStretch()
+
         self.setCentralWidget(central)
+
+        # 深色主题背景
+        self.setStyleSheet(
+            "#AboutPage { background: #1e2128; }"
+            "QMainWindow { background: #1e2128; }"
+        )
+
+    @staticmethod
+    def _make_separator() -> QLabel:
+        sep = QLabel()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(
+            "background: rgba(255,255,255,30); margin: 20px 0;"
+        )
+        return sep
 
     # ---------- 托盘 ----------
     def _create_tray(self) -> None:
@@ -96,7 +191,7 @@ class MainWindow(QMainWindow):
         self._tray_icon.setToolTip("Tram 划词翻译")
 
         menu = QMenu()
-        self._act(menu.addAction("显示主窗口"), self._show_from_tray)
+        self._act(menu.addAction("关于 Tram"), self._show_from_tray)
         menu.addSeparator()
         self._selection_action = self._act(menu.addAction("划词翻译"), self._toggle_selection)
         self._selection_action.setCheckable(True)
@@ -124,6 +219,8 @@ class MainWindow(QMainWindow):
         self._act(menu.addAction("退出"), self.quit_app)
 
         self._tray_icon.setContextMenu(menu)
+        # 左键点击托盘图标时也弹出上下文菜单（与右键行为一致）
+        self._tray_icon.activated.connect(self._on_tray_activated)
         self._tray_icon.show()
 
     def _make_tray_icon(self) -> QPixmap:
@@ -145,6 +242,30 @@ class MainWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def _on_tray_activated(
+        self, reason: QSystemTrayIcon.ActivationReason
+    ) -> None:
+        """左键点击托盘图标时弹出上下文菜单，与右键行为一致。"""
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            menu = self._tray_icon.contextMenu()
+            if menu is not None:
+                menu.exec(QCursor.pos())
+
+    def _notify(
+        self,
+        title: str,
+        message: str,
+        icon: QSystemTrayIcon.MessageIcon = QSystemTrayIcon.MessageIcon.Information,
+        msecs: int = 3000,
+    ) -> None:
+        """统一的系统通知封装：3 秒后自动消失。
+
+        Windows 可能忽略 msecs 参数，额外用 QTimer 兜底隐藏。
+        """
+        self._tray_icon.showMessage(title, message, icon, msecs)
+        # Windows 可能忽略 msecs，定时强制隐藏作为兜底
+        QTimer.singleShot(msecs, self._tray_icon.hideMessage)
 
     def _toggle_selection(self) -> None:
         enabled = self._selection_action.isChecked()
@@ -206,55 +327,50 @@ class MainWindow(QMainWindow):
 
     def _on_lang_test_ok(self, _reply: str) -> None:
         self._lang_test_worker = None
-        self._tray_icon.showMessage(
-            "Tram 划词", f"目标语言已切换为 {self._lang_test_lang}",
-            QSystemTrayIcon.MessageIcon.Information, 2000,
-        )
+        self._notify("Tram 划词", f"目标语言已切换为 {self._lang_test_lang}")
 
     def _on_lang_test_err(self, message: str) -> None:
         self._lang_test_worker = None
-        self._tray_icon.showMessage(
+        self._notify(
             "Tram 划词",
             f"目标语言已切换为 {self._lang_test_lang}，"
             f"但模型连接测试失败：\n{message.strip()[:120]}",
-            QSystemTrayIcon.MessageIcon.Warning, 5000,
+            QSystemTrayIcon.MessageIcon.Warning,
         )
 
     def _apply_selection_config(self) -> None:
+        """同步托盘菜单勾选状态与 tooltip，不负责启停热键或弹通知。
+
+        热键启停由 _toggle_selection / rebuild_backend / __init__ 负责，
+        通知由 _on_hotkey_status 回调统一处理，避免重复弹窗。
+        """
         sel = self._config.get("selection", {})
         enabled = sel.get("enabled", False)
         self._selection_action.setChecked(enabled)
-        if enabled:
-            self._selection_translator.start()
-            self._tray_icon.showMessage(
-                "Tram 划词",
-                f"划词翻译已开启，热键: {sel.get('hotkey', 'Ctrl+F4')}",
-                QSystemTrayIcon.MessageIcon.Information,
-                4000,
-            )
-        else:
-            self._tray_icon.showMessage(
-                "Tram 划词",
-                "点击托盘图标开启划词翻译",
-                QSystemTrayIcon.MessageIcon.Information,
-                4000,
-            )
+        self._tray_icon.setToolTip(
+            f"Tram - 划词: {'开' if enabled else '关'}"
+        )
 
     def _on_hotkey_status(self, ok: bool, message: str) -> None:
         if ok:
-            self._tray_icon.showMessage(
-                "Tram 划词", message,
-                QSystemTrayIcon.MessageIcon.Information, 3000,
-            )
+            self._notify("Tram 划词", message)
         else:
-            self._tray_icon.showMessage(
-                "Tram 划词", f"热键注册失败: {message}",
-                QSystemTrayIcon.MessageIcon.Warning, 5000,
+            self._notify(
+                "Tram 划词",
+                f"热键注册失败: {message}",
+                QSystemTrayIcon.MessageIcon.Warning,
             )
 
     # ---------- 菜单 ----------
     def open_settings(self) -> None:
+        # 单例：已打开则呼出到最前，不重复创建
+        if self._settings_dialog is not None:
+            self._settings_dialog.show()
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+            return
         dlg = SettingsDialog(self._config, self)
+        self._settings_dialog = dlg
         if dlg.exec():
             save_config(self._config)
             # 重建后端（切换模型时生效），并重新注册热键
@@ -265,6 +381,7 @@ class MainWindow(QMainWindow):
             self._apply_selection_config()
             # 同步托盘目标语言单选
             self._sync_target_lang_action()
+        self._settings_dialog = None
 
     def _sync_target_lang_action(self) -> None:
         """设置保存后同步托盘菜单的目标语言选中状态。"""
@@ -275,13 +392,21 @@ class MainWindow(QMainWindow):
             action.setChecked(action.text() == current)
 
     def open_glossary(self) -> None:
+        # 单例：已打开则呼出到最前，不重复创建
+        if self._glossary_dialog is not None:
+            self._glossary_dialog.show()
+            self._glossary_dialog.raise_()
+            self._glossary_dialog.activateWindow()
+            return
         from ..core import glossary as gs
 
         dlg = GlossaryDialog(self)
+        self._glossary_dialog = dlg
         if dlg.exec():
             self._config["glossary"] = gs.load_glossary()
             # 术语表变化后，允许立即用同一文本重新翻译验证效果
             self._selection_translator.invalidate_last_text()
+        self._glossary_dialog = None
 
     # ---------- 退出 ----------
     def quit_app(self) -> None:
@@ -304,12 +429,7 @@ class MainWindow(QMainWindow):
         if self._quitting:
             super().closeEvent(event)
             return
-        if self._config.get("selection", {}).get("enabled", False):
-            self.hide()
-            self._tray_icon.showMessage(
-                "Tram", "已最小化到系统托盘，划词翻译仍在运行。",
-                QSystemTrayIcon.MessageIcon.Information, 2000,
-            )
-            event.ignore()
-        else:
-            self.quit_app()
+        # 关于页面关闭仅隐藏窗口，不退出应用
+        # 退出由托盘菜单「退出」项负责
+        event.ignore()
+        self.hide()

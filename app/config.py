@@ -17,6 +17,13 @@ from pathlib import Path
 
 APP_NAME = "Tram Translator"
 
+try:
+    from importlib.metadata import version as _pkg_version
+
+    APP_VERSION = _pkg_version("tram")
+except Exception:  # 打包后元数据缺失时回退
+    APP_VERSION = "0.2.4"
+
 logger = logging.getLogger(__name__)
 
 CONFIG_DIR = Path(os.path.expanduser("~")) / ".tram"

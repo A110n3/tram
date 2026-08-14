@@ -44,6 +44,8 @@ PRESETS = {
 class SettingsDialog(QDialog):
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
+        # 在任务栏显示窗口，避免被其他窗口遮挡后无法呼出
+        self.setWindowFlags(Qt.WindowType.Window)
         self._config = config
         self.setWindowTitle("设置")
         self.setMinimumWidth(460)

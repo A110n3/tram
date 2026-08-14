@@ -118,7 +118,8 @@ class SelectionTranslator(QObject):
         self.hotkey_status.emit(False, msg)
 
     def _on_registration_ok(self) -> None:
-        self.hotkey_status.emit(True, "热键已就绪")
+        hotkey = self._config.get("selection", {}).get("hotkey", "Ctrl+F4")
+        self.hotkey_status.emit(True, f"划词已开启，热键: {hotkey}")
 
     # ---------- 热键处理 ----------
     def _on_hotkey(self) -> None:

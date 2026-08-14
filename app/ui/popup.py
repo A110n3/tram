@@ -69,10 +69,14 @@ class TranslationPopup(QFrame):
         # 避免与 setFixedHeight 产生 MINMAXINFO 约束冲突。
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        # 标题栏：仅关闭按钮，右对齐
+        # 标题栏：拖动提示 + 关闭按钮，右对齐
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(0)
+
+        drag_hint = QLabel("点击这里拖动浮窗")
+        drag_hint.setStyleSheet("color: #5a6270; font-size: 11px;")
+        drag_hint.setCursor(Qt.CursorShape.SizeAllCursor)
 
         close_btn = QPushButton("✕")  # ✕
         close_btn.setFixedSize(20, 20)
@@ -81,6 +85,7 @@ class TranslationPopup(QFrame):
         close_btn.setObjectName("TramClose")
         close_btn.clicked.connect(self._on_close_clicked)
 
+        header.addWidget(drag_hint)
         header.addStretch()
         header.addWidget(close_btn)
 

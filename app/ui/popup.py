@@ -211,8 +211,19 @@ class TranslationPopup(QFrame):
         # 强制刷新一次 UI，让"正在捕获"在 grab_selection 阻塞前渲染
         QApplication.processEvents()
 
+    def show_cached(self, text: str) -> None:
+        """直接展示缓存的译文（重复触发同一文本，无需重新翻译）。
+
+        与完整翻译流程的终态一致：可复制、可滚动、失焦自动隐藏。
+        """
+        self._slow_hint_timer.stop()
+        self._target_label.setStyleSheet("")  # 清除错误样式
+        self._target_label.setText(text)
+        self._scroll_to_top()
+        self._show()
+
     def fade_out(self) -> None:
-        """捕获失败时短暂提示后自动隐藏。"""
+        """短暂显示"未检测到选中文本"后自动隐藏（捕获失败）。"""
         self._slow_hint_timer.stop()
         self._target_label.setText("未检测到选中文本")
         self._target_label.setStyleSheet("color: #9aa0ac;")

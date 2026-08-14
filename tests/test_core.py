@@ -10,8 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.core.backend import BackendError
-from app.core.backend import StreamCancelled
+from app.core.backend import BackendError, StreamCancelled
 from app.core.chunking import split_text
 from app.core.glossary import to_prompt_block
 from app.core.prompts import build_messages
@@ -327,6 +326,127 @@ def test_translate_propagates_stream_cancelled():
     assert raised, "StreamCancelled 应穿透 Translator.translate"
     # 只调用了一次：取消不应触发重试
     assert backend.call_count == 1
+
+
+def test_translate_injects_glossary_into_prompt():
+    """config 中的术语表必须注入提示词，强制模型使用指定译法。
+
+    回归防护：术语表数据流为 glossary.json -> config["glossary"]
+    -> to_prompt_block -> build_messages。任一环节断链都会导致
+    术语表"保存了但不生效"。
+    """
+
+    class _CaptureBackend:
+        def __init__(self):
+            self.messages = None
+
+        def chat_stream(self, messages, temperature=0.2, max_tokens=2048, on_token=None):
+            self.messages = messages
+            if on_token:
+                on_token("ok")
+
+    backend = _CaptureBackend()
+    config = {
+        "backend": {},
+        "translation": {},
+        "glossary": [{"source": "API", "target": "应用程序接口"}],
+    }
+    Translator(backend, config).translate("hello")
+
+    system_content = backend.messages[0]["content"]
+    assert "API => 应用程序接口" in system_content
+    assert "Glossary" in system_content
+
+
+def test_translate_no_glossary_no_block():
+    """无术语表时提示词中不出现术语表块。"""
+
+    class _CaptureBackend:
+        def __init__(self):
+            self.messages = None
+
+        def chat_stream(self, messages, temperature=0.2, max_tokens=2048, on_token=None):
+            self.messages = messages
+            if on_token:
+                on_token("ok")
+
+    backend = _CaptureBackend()
+    Translator(backend, {"backend": {}, "glossary": []}).translate("hello")
+    assert "Glossary" not in backend.messages[0]["content"]
+
+
+def _patch_selection(selmod, fake_send_key, events):
+    """替换 selection 的系统交互函数为探针，返回还原函数。"""
+    orig = {
+        name: getattr(selmod, name)
+        for name in (
+            "_wait_modifiers_released",
+            "_set_clipboard_text",
+            "_read_clipboard_text",
+            "_send_key",
+        )
+    }
+    selmod._wait_modifiers_released = lambda timeout_ms=300: None
+    selmod._set_clipboard_text = lambda text, retries=8: True
+
+    def fake_read(retries=5):
+        events.append("read")
+        return ""
+    selmod._read_clipboard_text = fake_read
+    selmod._send_key = fake_send_key
+
+    def restore():
+        for name, fn in orig.items():
+            setattr(selmod, name, fn)
+    return restore
+
+
+def test_grab_selection_releases_keys_before_polling():
+    """Ctrl+C 按下后必须先抬起、再轮询剪贴板。
+
+    回归防护（v0.2.3 事故）：键抬起被移入 finally（轮询超时后才释放），
+    但目标应用只在按键抬起后才把选区写入剪贴板，按住期间剪贴板恒为空，
+    取词因此全部超时失败。
+    """
+    import app.core.selection as selmod
+
+    events: list = []
+
+    def fake_send_key(vk, up=False):
+        events.append(("up" if up else "down", vk))
+        return True
+
+    restore = _patch_selection(selmod, fake_send_key, events)
+    try:
+        result = selmod.grab_selection(timeout_ms=40)
+    finally:
+        restore()
+    assert result is None  # 未取到词，正常超时
+
+    # 两个 key-up 必须发生在第一次轮询读取（第二个 read）之前
+    first_poll_read = events.index("read", 1)
+    assert events.index(("up", selmod.VK_C)) < first_poll_read
+    assert events.index(("up", selmod.VK_CONTROL)) < first_poll_read
+
+
+def test_grab_selection_releases_ctrl_when_c_down_fails():
+    """C 按下失败时 Ctrl 已按下，finally 必须补发抬起防止 Ctrl 卡住。"""
+    import app.core.selection as selmod
+
+    events: list = []
+
+    def fake_send_key(vk, up=False):
+        events.append(("up" if up else "down", vk))
+        # 模拟 C 键按下失败，其余按键均成功
+        return not (vk == selmod.VK_C and not up)
+
+    restore = _patch_selection(selmod, fake_send_key, events)
+    try:
+        result = selmod.grab_selection(timeout_ms=40)
+    finally:
+        restore()
+    assert result is None
+    assert ("up", selmod.VK_CONTROL) in events
 
 
 if __name__ == "__main__":

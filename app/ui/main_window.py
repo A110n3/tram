@@ -167,6 +167,8 @@ class MainWindow(QMainWindow):
         lang = action.text()
         self._config.setdefault("translation", {})["target_lang"] = lang
         save_config(self._config)
+        # 目标语言变化后，允许立即用同一文本重新翻译验证效果
+        self._selection_translator.invalidate_last_text()
         self._start_lang_test(lang)
 
     def _start_lang_test(self, lang: str) -> None:
@@ -257,6 +259,8 @@ class MainWindow(QMainWindow):
             save_config(self._config)
             # 重建后端（切换模型时生效），并重新注册热键
             self._selection_translator.rebuild_backend()
+            # 翻译参数可能已变化，允许立即用同一文本重新翻译验证效果
+            self._selection_translator.invalidate_last_text()
             # 同步托盘菜单勾选状态与 tooltip
             self._apply_selection_config()
             # 同步托盘目标语言单选
@@ -276,6 +280,8 @@ class MainWindow(QMainWindow):
         dlg = GlossaryDialog(self)
         if dlg.exec():
             self._config["glossary"] = gs.load_glossary()
+            # 术语表变化后，允许立即用同一文本重新翻译验证效果
+            self._selection_translator.invalidate_last_text()
 
     # ---------- 退出 ----------
     def quit_app(self) -> None:

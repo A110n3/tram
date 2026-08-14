@@ -161,3 +161,51 @@ def test_load_config_coerces_bad_values_fallback():
     finally:
         cfg.CONFIG_FILE = orig
         os.unlink(path)
+
+
+def test_save_config_strips_runtime_glossary(tmp_path):
+    """glossary 是运行时注入的键，不得随 config.json 持久化。
+
+    术语表有自己的持久化文件（glossary.json）。若混入 config.json
+    会产生两份数据源，磁盘上的副本随过期配置误导排查。
+    """
+    orig_dir = cfg.CONFIG_DIR
+    orig_file = cfg.CONFIG_FILE
+    cfg.CONFIG_DIR = tmp_path
+    cfg.CONFIG_FILE = tmp_path / "config.json"
+    try:
+        config = load_config()
+        config["glossary"] = [{"source": "API", "target": "接口"}]
+        save_config(config)
+
+        with open(cfg.CONFIG_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        assert "glossary" not in data
+        # 正常配置不受影响
+        assert data["backend"]["base_url"] == "http://localhost:11434/v1"
+    finally:
+        cfg.CONFIG_DIR = orig_dir
+        cfg.CONFIG_FILE = orig_file
+
+
+def test_load_config_ignores_stored_glossary():
+    """旧版写入 config.json 的残留 glossary 键，读取时忽略。"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as tmp:
+        json.dump({
+            "backend": {"model": "m1"},
+            "glossary": [{"source": "x", "target": "y"}],
+        }, tmp)
+        path = tmp.name
+
+    orig = cfg.CONFIG_FILE
+    cfg.CONFIG_FILE = Path(path)
+    try:
+        result = load_config()
+        assert "glossary" not in result
+        # 其余配置正常读取
+        assert result["backend"]["model"] == "m1"
+    finally:
+        cfg.CONFIG_FILE = orig
+        os.unlink(path)

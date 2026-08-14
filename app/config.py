@@ -73,6 +73,11 @@ class TramConfig:
 DEFAULT_CONFIG: dict = asdict(TramConfig())
 DEFAULT_CONFIG.pop("glossary", None)
 
+# 运行时注入、不持久化到 config.json 的键。
+# glossary 单独保存在 glossary.json，启动时由 main 注入 config；
+# 若随 config 落盘会产生两份数据源，且磁盘上的副本很快过期。
+_RUNTIME_ONLY_KEYS = frozenset({"glossary"})
+
 # 已知数值/布尔字段的类型强制转换表，防止手动编辑 config.json
 # 时写入错误类型导致后续运行时崩溃
 _TYPE_COERCIONS: dict[str, dict[str, type]] = {
@@ -151,7 +156,11 @@ def _atomic_write(path: Path, data: str) -> None:
 
 
 def load_config() -> dict:
-    """读取配置为 dict（兼容旧接口），缺失项用默认值补齐。"""
+    """读取配置为 dict（兼容旧接口），缺失项用默认值补齐。
+
+    历史版本的 save_config 曾把运行时键（如 glossary）写进
+    config.json，读取时直接忽略这些键，以文件系统中的专用存储为准。
+    """
     cfg: dict = json.loads(json.dumps(DEFAULT_CONFIG))  # 深拷贝默认值
     try:
         if CONFIG_FILE.exists():
@@ -159,6 +168,8 @@ def load_config() -> dict:
                 stored = json.load(f)
             if isinstance(stored, dict):
                 for section, values in stored.items():
+                    if section in _RUNTIME_ONLY_KEYS:
+                        continue
                     if isinstance(values, dict):
                         cfg.setdefault(section, {}).update(values)
                     else:
@@ -169,8 +180,13 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
-    """原子写入配置到 JSON 文件。"""
-    _atomic_write(CONFIG_FILE, json.dumps(cfg, ensure_ascii=False, indent=2))
+    """原子写入配置到 JSON 文件。
+
+    剥离运行时注入的键（glossary 等），它们有自己的持久化位置，
+    不应混入 config.json。
+    """
+    data = {k: v for k, v in cfg.items() if k not in _RUNTIME_ONLY_KEYS}
+    _atomic_write(CONFIG_FILE, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def save_glossary_json(entries: list[dict]) -> None:

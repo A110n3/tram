@@ -11,7 +11,7 @@ import logging
 import time
 from collections.abc import Callable
 
-from .backend import BackendError, OpenAIBackend, StreamCancelled
+from .backend import BackendError, OpenAIBackend
 from .chunking import split_text
 from .glossary import to_prompt_block
 from .prompts import build_messages

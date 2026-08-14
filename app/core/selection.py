@@ -138,6 +138,13 @@ def grab_selection(timeout_ms: int = 400) -> str | None:
             logger.warning("模拟 Ctrl+C 失败，跳过取词")
             return None
 
+        # 关键：按下后必须立即抬起再轮询剪贴板。
+        # 实测目标应用只在按键抬起后才把选区写入剪贴板，
+        # 按住期间剪贴板恒为空，"按住+轮询"必然超时取不到词
+        # （v0.2.3 曾把抬起移入 finally，导致取词全部失败）。
+        if _send_key(VK_C, up=True) and _send_key(VK_CONTROL, up=True):
+            ctrl_pressed = False
+
         deadline = time.monotonic() + timeout_ms / 1000.0
         while time.monotonic() < deadline:
             text = _read_clipboard_text(retries=1)
@@ -146,8 +153,8 @@ def grab_selection(timeout_ms: int = 400) -> str | None:
             time.sleep(0.02)
         return None  # 超时，无选中内容
     finally:
-        # 保证按键释放：即使 Ctrl+C 发送失败或取词超时，
-        # 也必须抬起 Ctrl，否则系统-wide Ctrl 卡住影响后续操作
+        # 兜底：正常路径已在轮询前释放并清除 ctrl_pressed；
+        # 仅在"C 按下失败/抬起失败"时补发 key-up，防止 Ctrl 卡住
         if ctrl_pressed:
             _send_key(VK_C, up=True)
             _send_key(VK_CONTROL, up=True)

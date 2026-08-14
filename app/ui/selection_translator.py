@@ -45,6 +45,7 @@ class SelectionTranslator(QObject):
         self._hotkey_thread: GlobalHotkeyThread | None = None
         self._worker: TranslateWorker | None = None
         self._last_text: str = ""  # 最近一次成功翻译的文本，用于去重
+        self._last_result: str = ""  # 对应的译文，重复触发时直接重显
         self._pending_text: str = ""  # 当前正在翻译的文本
 
     # ---------- 后端 ----------
@@ -148,9 +149,14 @@ class SelectionTranslator(QObject):
             if self._popup:
                 self._popup.hide()
             return
-        if stripped == self._last_text:
+        if stripped == self._last_text and self._last_result:
+            # 重复触发同一文本：直接重新展示缓存的译文，不重新翻译。
+            # 用户可能不小心关掉了浮窗，需要再按热键找回译文；
+            # 直接展示缓存也省去重复调用后端的等待。
+            # 术语表/设置/目标语言变化后缓存已被 invalidate_last_text
+            # 清空，此处展示的始终是与当前配置匹配的译文。
             if self._popup:
-                self._popup.hide()
+                self._popup.show_cached(self._last_result)
             return
         # 注意：不在此处记录 _last_text。翻译失败时用户常会重试
         # 同一文本，若失败也记录去重，重试会被静默拦截。
@@ -195,20 +201,32 @@ class SelectionTranslator(QObject):
 
     # ---------- 翻译回调 ----------
     def _on_selection_success(self, result: str) -> None:
-        # 成功后才记录去重文本
+        # 成功后才记录去重文本与译文缓存
         self._last_text = self._pending_text
+        self._last_result = result
         if self._popup:
             self._popup.set_translation(result)
 
     def _on_selection_failed(self, message: str) -> None:
         # 失败后清空记录，允许立即重试同一文本
         self._last_text = ""
+        self._last_result = ""
         if self._popup:
             self._popup.show_error(message)
 
     def _on_retry(self) -> None:
         if self._popup:
             self._popup.show_loading()
+
+    # ---------- 去重缓存 ----------
+    def invalidate_last_text(self) -> None:
+        """清空去重缓存（原文与译文），强制下次重新翻译。
+
+        术语表/设置/目标语言变化后，缓存的译文已过时；用户通常
+        立刻用同一段文本验证效果，此时必须重新翻译，不能重显旧译文。
+        """
+        self._last_text = ""
+        self._last_result = ""
 
     # ---------- 切换模型 ----------
     def rebuild_backend(self) -> None:

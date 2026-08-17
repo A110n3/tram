@@ -9,6 +9,7 @@
 ## 功能
 
 - **全局热键取词**：选中任意文本，按热键（默认 `Ctrl+F4`），自动获取并翻译
+- **OCR 识图翻译**：按热键（默认 `Ctrl+Shift+F4`）框选屏幕任意区域，内置中英文 OCR 模型识别后翻译（图片、PDF、视频字幕皆可）
 - **流式悬浮窗**：译文边生成边显示，跟随鼠标，失焦自动隐藏，可拖动
 - **系统托盘常驻**：后台静默运行，自动最小化到托盘
 - **多后端切换**：Ollama / LM Studio / vLLM 等任意 OpenAI 兼容 API
@@ -37,6 +38,12 @@ pip install .
 python -m app.main
 ```
 
+OCR 识图翻译为可选功能，引擎栈（rapidocr + onnxruntime，含内置中英文模型，约 150MB）不随主程序安装：
+
+```bash
+pip install ".[ocr]"
+```
+
 首次运行请在托盘菜单中打开「设置」，选择后端预设并填写模型名称（如 `qwen2.5:7b`），点击「测试连接」确认可用。然后勾选「启用划词翻译」。
 
 运行日志位于 `~/.tram/tram.log`，反馈问题时请附带。
@@ -47,15 +54,20 @@ python -m app.main
 |------|------|
 | 开启/关闭划词 | 右键托盘图标 → 划词翻译 |
 | 取词翻译 | 选中文本后按 `Ctrl+F4`（可在设置中修改） |
+| 开启/关闭 OCR | 右键托盘图标 → OCR 识图翻译 |
+| 识图翻译 | 按 `Ctrl+Shift+F4` 框选屏幕区域（可在设置中修改） |
 | 关闭悬浮窗 | 点击 ✕ 或点击窗口外部 |
 | 拖动悬浮窗 | 按住任意空白区域拖动 |
 | 切换模型 | 托盘菜单 → 设置 |
 | 退出程序 | 托盘菜单 → 退出 |
 
+OCR 说明：框选后可用 ESC/右键取消；首次识别需加载模型（数秒），之后秒开；
+未安装 OCR 可选依赖时，按热键会在托盘提示安装命令。
+
 ## 开发与测试
 
 ```bash
-pip install ".[dev]"
+pip install ".[dev,ocr]"
 
 python -m pytest tests/ -q      # 运行测试
 python -m ruff check app/ tests/ # 代码检查
@@ -75,16 +87,19 @@ app/
 │   ├── chunking.py             # 长文本分段
 │   ├── glossary.py             # 术语表 (~/.tram/glossary.json)
 │   ├── hotkey.py               # 全局热键监听 (Win32 RegisterHotKey)
+│   ├── ocr.py                  # RapidOCR 封装（PaddleOCR 模型 ONNX 版）
 │   ├── prompts.py              # 翻译提示词模板
 │   ├── selection.py            # 模拟 Ctrl+C 取词 + 剪贴板恢复
 │   └── translator.py           # 翻译编排
 └── ui/
     ├── main_window.py          # 托盘常驻主窗口
     ├── popup.py                # 悬浮窗
+    ├── region_overlay.py       # 全屏框选覆盖层
     ├── selection_translator.py # 划词翻译编排器
+    ├── ocr_translator.py       # OCR 识图翻译编排器
     ├── settings_dialog.py      # 设置对话框
     ├── glossary_dialog.py      # 术语表编辑
-    └── worker.py               # 翻译后台线程
+    └── worker.py               # 翻译/OCR 后台线程
 ```
 
 ## 路线图
@@ -93,6 +108,8 @@ app/
 - [x] 后端配置 + 连接测试
 - [x] 术语表 + 上下文保持
 - [x] 多后端可切换
+- [x] OCR 识图翻译（RapidOCR 内置中英文模型，框选即译）
+- [ ] OCR 更多语言（日/韩等专用模型）
 - [ ] 文件翻译（txt / markdown / SRT）
 - [ ] 历史记录
 - [ ] 双语导出

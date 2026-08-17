@@ -1,5 +1,8 @@
 # OCR 识图翻译实现方案（定稿，2026-08-14）
 
+> **状态：已实施**（2026-08-17，提交 5308b9b，随 v0.3.0 发布）。
+> 实施结果与原方案的差异见文末「附记：实施结果」。
+
 引擎：**Tesseract**（tessdata_fast 档），经体积/多语言/打包三方面实测评估后确定。
 目标版本：**v0.3.0**。
 
@@ -156,3 +159,21 @@ vendor/tesseract/          ← .gitignore 排除，不入库
 5. `main_window.py` / `settings_dialog.py` 接线
 6. `tram.spec` / `release.yml` / README / 版本号
 7. 运行时验证 + 重建 exe
+
+## 附记：实施结果（2026-08-17）
+
+按本方案全部落地，72 测试全过（含真实引擎端到端集成用例），ruff 全绿。
+与原方案的差异：
+
+1. **引擎版本与体积**：UB-Mannheim 5.3.x 下载源不可达（winget/GitHub 均只有
+   5.4.0），改用 5.4.0。其 `libtesseract-5.dll` 内嵌 ~100MB DWARF 调试节区，
+   `fetch_tesseract.py` 增加 pefile 剥离逻辑（截断尾部 `.debug_*` 节区 +
+   修补 PE 头 + 移除失效数字签名），瘦身至 3.1MB。引擎 + 依赖 DLL
+   （ICU 等，不可精简）+ 六语言包实际共 **~80MB**，高于原预估 26MB。
+2. **ocr.py API**：`ocr_image(pixmap)` 拆为 `pixmap_to_png(pixmap)`（预处理）
+   与 `ocr_bytes(png, languages)`（子进程调用）两层，便于单测与复用。
+3. **集成测试**：新增真实引擎端到端用例 + 夹具图 `tests/data/ocr_fixture.png`。
+   Qt offscreen 平台零字体（文字渲染成豆腐块），夹具须在真实桌面会话生成
+   （`tools/make_ocr_fixture.py`，已入库）；无引擎/语言包的环境自动跳过。
+4. **依赖**：dev extras 增加 `pefile`（仅 `fetch_tesseract.py` 使用，
+   运行时无新增依赖，与原方案一致）。

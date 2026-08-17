@@ -16,6 +16,62 @@ def test_tram_config_defaults():
     assert c.backend.base_url == "http://localhost:11434/v1"
     assert c.translation.chunk_chars == 2000
     assert c.selection.enabled is False
+    assert c.ocr.enabled is False
+    assert c.ocr.hotkey == "Ctrl+Shift+F4"
+    assert c.ocr.languages == "ch"
+    assert c.ocr.min_chars == 2
+
+
+def test_load_config_ocr_section_and_coercion():
+    """ocr 段读取 + 数值/布尔类型强制转换。"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as tmp:
+        json.dump({
+            "ocr": {
+                "enabled": "true",
+                "hotkey": "Ctrl+Shift+F2",
+                "languages": "jpn+eng",
+                "min_chars": "3",
+            },
+        }, tmp)
+        path = tmp.name
+
+    orig = cfg.CONFIG_FILE
+    cfg.CONFIG_FILE = Path(path)
+    try:
+        result = load_config()
+        assert result["ocr"]["enabled"] is True
+        assert result["ocr"]["hotkey"] == "Ctrl+Shift+F2"
+        assert result["ocr"]["languages"] == "jpn+eng"
+        assert result["ocr"]["min_chars"] == 3
+        assert isinstance(result["ocr"]["min_chars"], int)
+    finally:
+        cfg.CONFIG_FILE = orig
+        os.unlink(path)
+
+
+def test_load_config_ocr_missing_uses_defaults():
+    """旧版 config.json 无 ocr 段时补齐默认值。"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as tmp:
+        json.dump({"selection": {"enabled": True}}, tmp)
+        path = tmp.name
+
+    orig = cfg.CONFIG_FILE
+    cfg.CONFIG_FILE = Path(path)
+    try:
+        result = load_config()
+        assert result["ocr"] == {
+            "enabled": False,
+            "hotkey": "Ctrl+Shift+F4",
+            "languages": "ch",
+            "min_chars": 2,
+        }
+    finally:
+        cfg.CONFIG_FILE = orig
+        os.unlink(path)
 
 
 def test_load_config_missing_file():

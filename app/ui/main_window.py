@@ -378,14 +378,12 @@ class MainWindow(QMainWindow):
     def _on_hotkey_status(
         self, ok: bool, message: str, title: str = "Tram 划词"
     ) -> None:
+        # 消息原样展示：注册失败消息自带「热键 X 注册失败」表述，
+        # 引导类消息（如 OCR 引擎未安装）不是注册失败，不能加前缀
         if ok:
             self._notify(title, message)
         else:
-            self._notify(
-                title,
-                f"热键注册失败: {message}",
-                QSystemTrayIcon.MessageIcon.Warning,
-            )
+            self._notify(title, message, QSystemTrayIcon.MessageIcon.Warning)
 
     # ---------- 菜单 ----------
     def open_settings(self) -> None:

@@ -173,6 +173,23 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(sel_gb)
 
+        # OCR 识图翻译分组
+        ocr_gb = QGroupBox("OCR 识图翻译")
+        ol = QFormLayout(ocr_gb)
+        ol.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.ocr_enabled_cb = QCheckBox("启用 OCR 识图翻译")
+        self.ocr_hotkey_edit = QKeySequenceEdit()
+        self.ocr_hotkey_edit.keySequenceChanged.connect(self._validate_ocr_hotkey)
+        self._ocr_hotkey_validation = QLabel("")
+        self._ocr_hotkey_validation.setStyleSheet("color: #888; font-size: 11px;")
+
+        ol.addRow("", self.ocr_enabled_cb)
+        ol.addRow("全局热键", self.ocr_hotkey_edit)
+        ol.addRow("", self._ocr_hotkey_validation)
+
+        layout.addWidget(ocr_gb)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -219,6 +236,16 @@ class SettingsDialog(QDialog):
         # 初始校验当前热键
         self._validate_hotkey(None)
 
+        ocr = self._config.get("ocr", {})
+        self.ocr_enabled_cb.setChecked(ocr.get("enabled", False))
+        self.ocr_hotkey_edit.setKeySequence(
+            QKeySequence.fromString(
+                ocr.get("hotkey", "Ctrl+Shift+F4"),
+                QKeySequence.SequenceFormat.PortableText,
+            )
+        )
+        self._validate_ocr_hotkey(None)
+
     def _on_preset(self) -> None:
         url = self.preset_combo.currentData()
         if url:
@@ -232,6 +259,9 @@ class SettingsDialog(QDialog):
         hotkey_spec = self.selection_hotkey_edit.keySequence().toString(
             QKeySequence.SequenceFormat.PortableText
         ) or "Ctrl+F4"
+        ocr_hotkey_spec = self.ocr_hotkey_edit.keySequence().toString(
+            QKeySequence.SequenceFormat.PortableText
+        ) or "Ctrl+Shift+F4"
 
         # 格式校验：先看 parse_hotkey 能不能解析
         try:
@@ -256,6 +286,37 @@ class SettingsDialog(QDialog):
                 self.selection_hotkey_edit.setFocus()
                 return
 
+        # OCR 热键：格式校验
+        try:
+            parse_hotkey(ocr_hotkey_spec)
+        except HotkeyError as e:
+            self._ocr_hotkey_validation.setText(f"✗ {e}")
+            self._ocr_hotkey_validation.setStyleSheet(
+                "color: #c0392b; font-size: 11px;"
+            )
+            self.ocr_hotkey_edit.setFocus()
+            return
+        # 与划词热键重复：两个热键线程无法同时注册同一组合
+        if ocr_hotkey_spec == hotkey_spec:
+            err = "✗ 与划词热键重复，请更换组合键"
+            self._ocr_hotkey_validation.setText(err)
+            self._ocr_hotkey_validation.setStyleSheet(
+                "color: #c0392b; font-size: 11px;"
+            )
+            self.ocr_hotkey_edit.setFocus()
+            return
+        # 可注册性校验（与已存配置相同则跳过）
+        current_ocr_hotkey = self._config.get("ocr", {}).get("hotkey", "")
+        if ocr_hotkey_spec != current_ocr_hotkey:
+            ok, err = test_hotkey_available(ocr_hotkey_spec)
+            if not ok:
+                self._ocr_hotkey_validation.setText(f"✗ {err}")
+                self._ocr_hotkey_validation.setStyleSheet(
+                    "color: #c0392b; font-size: 11px;"
+                )
+                self.ocr_hotkey_edit.setFocus()
+                return
+
         self._config.setdefault("backend", {}).update(
             base_url=self.base_url_edit.text().strip(),
             api_key=self.api_key_edit.text().strip(),
@@ -276,6 +337,14 @@ class SettingsDialog(QDialog):
             hotkey=hotkey_spec,
             min_chars=self.selection_min_chars_spin.value(),
             auto_hide_ms=sel.get("auto_hide_ms", 0),
+        )
+        # languages/min_chars 为 v1 预留字段（config.json 手改），保留原值
+        ocr = self._config.setdefault("ocr", {})
+        ocr.update(
+            enabled=self.ocr_enabled_cb.isChecked(),
+            hotkey=ocr_hotkey_spec,
+            languages=ocr.get("languages", "ch"),
+            min_chars=ocr.get("min_chars", 2),
         )
         self.accept()
 
@@ -299,6 +368,31 @@ class SettingsDialog(QDialog):
         except HotkeyError as e:
             self._hotkey_validation.setText(f"✗ {e}")
             self._hotkey_validation.setStyleSheet(
+                "color: #c0392b; font-size: 11px;"
+            )
+
+    def _validate_ocr_hotkey(self, _seq: QKeySequence | None) -> None:
+        """实时校验 OCR 热键是否可解析，给出即时反馈。"""
+        spec = self.ocr_hotkey_edit.keySequence().toString(
+            QKeySequence.SequenceFormat.PortableText
+        )
+        if not spec:
+            self._ocr_hotkey_validation.setText(
+                "请输入全局热键，例如 Ctrl+Shift+F4"
+            )
+            self._ocr_hotkey_validation.setStyleSheet(
+                "color: #e67e22; font-size: 11px;"
+            )
+            return
+        try:
+            parse_hotkey(spec)
+            self._ocr_hotkey_validation.setText(f"✓ {spec}")
+            self._ocr_hotkey_validation.setStyleSheet(
+                "color: #27ae60; font-size: 11px;"
+            )
+        except HotkeyError as e:
+            self._ocr_hotkey_validation.setText(f"✗ {e}")
+            self._ocr_hotkey_validation.setStyleSheet(
                 "color: #c0392b; font-size: 11px;"
             )
 

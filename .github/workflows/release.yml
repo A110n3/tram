@@ -23,6 +23,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install ".[dev]"
 
+      - name: Prepare Tesseract (OCR engine + language packs)
+        run: |
+          choco install -y tesseract
+          python tools/fetch_tesseract.py
+
       - name: Build exe
         run: python -m PyInstaller tram.spec --noconfirm
 

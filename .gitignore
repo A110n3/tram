@@ -27,6 +27,7 @@ desktop.ini
 
 # 会话/临时记录
 conversation-*.txt
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.txt
 
 # 工具缓存
 .pytest_cache/
@@ -35,3 +36,6 @@ conversation-*.txt
 
 # Claude 会话计划文件
 .claude/plans/
+
+# OCR 引擎与语言包（tools/fetch_tesseract.py 拉取，不入库）
+vendor/

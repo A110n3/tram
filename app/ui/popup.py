@@ -49,6 +49,7 @@ class TranslationPopup(QFrame):
         self.setObjectName("TramPopup")
         self._auto_hide_ms = auto_hide_ms
         self._drag_pos: QPoint | None = None
+        self._loading_text = "翻译中…"  # 当前 loading 占位文案（OCR 用"识别中…"）
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -143,9 +144,10 @@ class TranslationPopup(QFrame):
         )
 
     # ---------- 内容 ----------
-    def show_loading(self) -> None:
+    def show_loading(self, label: str = "翻译中…") -> None:
+        self._loading_text = label  # append_token/慢提示据此识别占位文案
         self._target_label.setStyleSheet("")  # 清除错误样式
-        self._target_label.setText("翻译中…")
+        self._target_label.setText(label)
         self._scroll_to_top()
         self._show()
         # 后端加载模型等场景首个 token 会很慢，超时给出提示避免像卡死
@@ -158,8 +160,8 @@ class TranslationPopup(QFrame):
         stick_to_bottom = bar.value() >= bar.maximum() - 4
 
         cur = self._target_label.text()
-        # startswith：兼容"翻译中…"与慢响应提示文案
-        if cur.startswith("翻译中…"):
+        # startswith：兼容"翻译中…"（或 OCR 的"识别中…"）与慢响应提示文案
+        if cur.startswith(self._loading_text):
             cur = ""
         self._target_label.setText(cur + token)
         self._adjust_height()
@@ -186,9 +188,11 @@ class TranslationPopup(QFrame):
 
     def _show_slow_hint(self) -> None:
         """等待首个 token 超时：提示后端可能在加载模型。"""
-        if not self._target_label.text().startswith("翻译中…"):
+        if not self._target_label.text().startswith(self._loading_text):
             return  # 已有译文/报错则不覆盖
-        self._target_label.setText("翻译中…（等待后端响应，可能在加载模型）")
+        self._target_label.setText(
+            f"{self._loading_text}（等待后端响应，可能在加载模型）"
+        )
         self._adjust_height()
 
     def _on_close_clicked(self) -> None:
@@ -227,10 +231,10 @@ class TranslationPopup(QFrame):
         self._scroll_to_top()
         self._show()
 
-    def fade_out(self) -> None:
-        """短暂显示"未检测到选中文本"后自动隐藏（捕获失败）。"""
+    def fade_out(self, text: str = "未检测到选中文本") -> None:
+        """短暂显示提示文案后自动隐藏（捕获失败/无识别结果）。"""
         self._slow_hint_timer.stop()
-        self._target_label.setText("未检测到选中文本")
+        self._target_label.setText(text)
         self._target_label.setStyleSheet("color: #9aa0ac;")
         self._scroll_to_top()
         self._adjust_height()

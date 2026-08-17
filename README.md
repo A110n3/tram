@@ -9,6 +9,7 @@
 ## 功能
 
 - **全局热键取词**：选中任意文本，按热键（默认 `Ctrl+F4`），自动获取并翻译
+- **OCR 识图翻译**：按热键（默认 `Ctrl+Shift+F4`）框选屏幕区域，识别文字并翻译，内置中/繁/日/英/韩/俄语言包
 - **流式悬浮窗**：译文边生成边显示，跟随鼠标，失焦自动隐藏，可拖动
 - **系统托盘常驻**：后台静默运行，自动最小化到托盘
 - **多后端切换**：Ollama / LM Studio / vLLM 等任意 OpenAI 兼容 API
@@ -41,12 +42,29 @@ python -m app.main
 
 运行日志位于 `~/.tram/tram.log`，反馈问题时请附带。
 
+### OCR 识图翻译（v0.3.0+）
+
+exe 版内置 Tesseract 引擎与中/繁/日/英/韩/俄语言包，开箱即用。源码运行需要准备引擎：
+
+```bash
+winget install UB-Mannheim.TesseractOCR   # 安装引擎
+python tools/fetch_tesseract.py           # 复制引擎 + 拉取语言包到 vendor/
+```
+
+或仅安装 winget 包（程序会自动发现 PATH / Program Files 中的安装）。
+
+- 识别语言默认 `chi_sim+eng`，需要日文等时在 `~/.tram/config.json` 的
+  `ocr.languages` 手改（如 `jpn+eng`）；混排语言越多精度越掉
+- v1 仅支持主显示器；框选高度小于 60px 时自动放大图像提升小字号识别率
+
 ## 使用说明
 
 | 操作 | 方式 |
 |------|------|
 | 开启/关闭划词 | 右键托盘图标 → 划词翻译 |
 | 取词翻译 | 选中文本后按 `Ctrl+F4`（可在设置中修改） |
+| 开启/关闭 OCR | 右键托盘图标 -> OCR 识图翻译 |
+| 识图翻译 | 按 `Ctrl+Shift+F4` -> 拖拽框选屏幕文字 -> 松开即译；ESC/右键取消 |
 | 关闭悬浮窗 | 点击 ✕ 或点击窗口外部 |
 | 拖动悬浮窗 | 按住任意空白区域拖动 |
 | 切换模型 | 托盘菜单 → 设置 |
@@ -75,16 +93,19 @@ app/
 │   ├── chunking.py             # 长文本分段
 │   ├── glossary.py             # 术语表 (~/.tram/glossary.json)
 │   ├── hotkey.py               # 全局热键监听 (Win32 RegisterHotKey)
+│   ├── ocr.py                  # Tesseract 封装（子进程 + 预处理 + 清洗）
 │   ├── prompts.py              # 翻译提示词模板
 │   ├── selection.py            # 模拟 Ctrl+C 取词 + 剪贴板恢复
 │   └── translator.py           # 翻译编排
 └── ui/
     ├── main_window.py          # 托盘常驻主窗口
+    ├── ocr_translator.py       # OCR 识图翻译编排器
     ├── popup.py                # 悬浮窗
+    ├── region_overlay.py       # 全屏选区覆盖层（OCR 框选）
     ├── selection_translator.py # 划词翻译编排器
     ├── settings_dialog.py      # 设置对话框
     ├── glossary_dialog.py      # 术语表编辑
-    └── worker.py               # 翻译后台线程
+    └── worker.py               # 翻译/OCR 后台线程
 ```
 
 ## 路线图
@@ -93,6 +114,9 @@ app/
 - [x] 后端配置 + 连接测试
 - [x] 术语表 + 上下文保持
 - [x] 多后端可切换
+- [ ] OCR识图翻译
+  - [x] v0.3.0：Tesseract 引擎、框选截图、六语言包、共用翻译管线
+  - [ ] 多显示器截屏、"仅 OCR 不翻译"模式、识别语言下拉框
 - [ ] 文件翻译（txt / markdown / SRT）
 - [ ] 历史记录
 - [ ] 双语导出

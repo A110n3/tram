@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 from ..config import APP_VERSION, save_config
 from ..core.prompts import TARGET_LANGS
 from .glossary_dialog import GlossaryDialog
+from .ocr_translator import OCRTranslator
 from .selection_translator import SelectionTranslator
 from .settings_dialog import SettingsDialog
 from .worker import TestConnectionWorker
@@ -42,7 +43,15 @@ class MainWindow(QMainWindow):
 
         # 划词翻译服务
         self._selection_translator = SelectionTranslator(self._config)
-        self._selection_translator.hotkey_status.connect(self._on_hotkey_status)
+        self._selection_translator.hotkey_status.connect(
+            lambda ok, msg: self._on_hotkey_status(ok, msg, "Tram 划词")
+        )
+
+        # OCR 识图翻译服务
+        self._ocr_translator = OCRTranslator(self._config)
+        self._ocr_translator.hotkey_status.connect(
+            lambda ok, msg: self._on_hotkey_status(ok, msg, "Tram OCR")
+        )
 
         # 切换目标语言后的连接测试线程
         self._lang_test_worker: TestConnectionWorker | None = None
@@ -57,6 +66,10 @@ class MainWindow(QMainWindow):
             self._selection_translator.start()
         else:
             self._notify("Tram 划词", "点击托盘图标开启划词翻译")
+
+        # 启动 OCR 识图翻译（如果已启用）
+        if self._config.get("ocr", {}).get("enabled", False):
+            self._ocr_translator.start()
 
         # 启动后隐藏主窗口，仅托盘运行
         self.hide()
@@ -195,6 +208,8 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         self._selection_action = self._act(menu.addAction("划词翻译"), self._toggle_selection)
         self._selection_action.setCheckable(True)
+        self._ocr_action = self._act(menu.addAction("OCR 识图翻译"), self._toggle_ocr)
+        self._ocr_action.setCheckable(True)
 
         # 目标语言快捷子菜单
         lang_menu = menu.addMenu("目标语言")
@@ -275,9 +290,17 @@ class MainWindow(QMainWindow):
             self._selection_translator.start()
         else:
             self._selection_translator.stop()
-        self._tray_icon.setToolTip(
-            f"Tram - 划词: {'开' if enabled else '关'}"
-        )
+        self._apply_selection_config()
+
+    def _toggle_ocr(self) -> None:
+        enabled = self._ocr_action.isChecked()
+        self._config.setdefault("ocr", {})["enabled"] = enabled
+        save_config(self._config)
+        if enabled:
+            self._ocr_translator.start()
+        else:
+            self._ocr_translator.stop()
+        self._apply_selection_config()
 
     def _on_target_lang_changed(self, action: QAction) -> None:
         """托盘菜单快捷切换目标语言。
@@ -290,6 +313,7 @@ class MainWindow(QMainWindow):
         save_config(self._config)
         # 目标语言变化后，允许立即用同一文本重新翻译验证效果
         self._selection_translator.invalidate_last_text()
+        self._ocr_translator.invalidate_last_text()
         self._start_lang_test(lang)
 
     def _start_lang_test(self, lang: str) -> None:
@@ -341,22 +365,25 @@ class MainWindow(QMainWindow):
     def _apply_selection_config(self) -> None:
         """同步托盘菜单勾选状态与 tooltip，不负责启停热键或弹通知。
 
-        热键启停由 _toggle_selection / rebuild_backend / __init__ 负责，
+        热键启停由 _toggle_* / rebuild_backend / __init__ 负责，
         通知由 _on_hotkey_status 回调统一处理，避免重复弹窗。
         """
         sel = self._config.get("selection", {})
-        enabled = sel.get("enabled", False)
-        self._selection_action.setChecked(enabled)
-        self._tray_icon.setToolTip(
-            f"Tram - 划词: {'开' if enabled else '关'}"
-        )
+        ocr = self._config.get("ocr", {})
+        self._selection_action.setChecked(sel.get("enabled", False))
+        self._ocr_action.setChecked(ocr.get("enabled", False))
+        sel_on = "开" if sel.get("enabled", False) else "关"
+        ocr_on = "开" if ocr.get("enabled", False) else "关"
+        self._tray_icon.setToolTip(f"Tram - 划词: {sel_on} | OCR: {ocr_on}")
 
-    def _on_hotkey_status(self, ok: bool, message: str) -> None:
+    def _on_hotkey_status(
+        self, ok: bool, message: str, title: str = "Tram 划词"
+    ) -> None:
         if ok:
-            self._notify("Tram 划词", message)
+            self._notify(title, message)
         else:
             self._notify(
-                "Tram 划词",
+                title,
                 f"热键注册失败: {message}",
                 QSystemTrayIcon.MessageIcon.Warning,
             )
@@ -375,8 +402,10 @@ class MainWindow(QMainWindow):
             save_config(self._config)
             # 重建后端（切换模型时生效），并重新注册热键
             self._selection_translator.rebuild_backend()
+            self._ocr_translator.rebuild_backend()
             # 翻译参数可能已变化，允许立即用同一文本重新翻译验证效果
             self._selection_translator.invalidate_last_text()
+            self._ocr_translator.invalidate_last_text()
             # 同步托盘菜单勾选状态与 tooltip
             self._apply_selection_config()
             # 同步托盘目标语言单选
@@ -406,6 +435,7 @@ class MainWindow(QMainWindow):
             self._config["glossary"] = gs.load_glossary()
             # 术语表变化后，允许立即用同一文本重新翻译验证效果
             self._selection_translator.invalidate_last_text()
+            self._ocr_translator.invalidate_last_text()
         self._glossary_dialog = None
 
     # ---------- 退出 ----------
@@ -421,6 +451,7 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass  # 僵尸包装器（C++ 对象已删除），无需处理
         self._selection_translator.shutdown()
+        self._ocr_translator.shutdown()
         app = QApplication.instance()
         if app is not None:
             app.quit()

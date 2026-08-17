@@ -15,6 +15,7 @@ import logging
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..core.backend import BackendError, fetch_models, test_connection
+from ..core.ocr import ocr_bytes
 from ..core.translator import Translator
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,31 @@ class TranslateWorker(QThread):
             if not self._stop_flag:
                 logger.warning("翻译失败: %s", e, exc_info=True)
                 self.failed.emit(str(e))
+
+
+class OCRWorker(QThread):
+    """在 QThread 中执行 Tesseract 子进程识别。
+
+    QPixmap 非跨线程安全，调用方在主线程先转成 PNG 字节流再传入；
+    本线程只做临时文件落盘 + subprocess，无任何 GUI 依赖。
+    """
+
+    succeeded = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, png: bytes, languages: str, parent=None):
+        super().__init__(parent)
+        self._png = png
+        self._languages = languages
+
+    def run(self) -> None:
+        try:
+            text = ocr_bytes(self._png, self._languages)
+        except Exception as e:  # 二进制缺失/崩溃/超时
+            logger.warning("OCR 失败: %s", e, exc_info=True)
+            self.failed.emit(str(e))
+        else:
+            self.succeeded.emit(text)
 
 
 class TestConnectionWorker(QThread):

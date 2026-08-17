@@ -22,7 +22,7 @@ try:
 
     APP_VERSION = _pkg_version("tram")
 except Exception:  # 打包后元数据缺失时回退
-    APP_VERSION = "0.2.4"
+    APP_VERSION = "0.3.0"
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +66,19 @@ class SelectionConfig:
 
 
 @dataclass
+class OCRConfig:
+    enabled: bool = False  # OCR 识图翻译模式开关
+    hotkey: str = "Ctrl+Shift+F4"  # 全局热键：触发框选识别
+    languages: str = "chi_sim+eng"  # Tesseract -l 参数，混排越多精度越掉
+    min_chars: int = 2  # 识别文本短于此值视为无文字，淡出提示
+
+
+@dataclass
 class TramConfig:
     backend: BackendConfig = field(default_factory=BackendConfig)
     translation: TranslationConfig = field(default_factory=TranslationConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
+    ocr: OCRConfig = field(default_factory=OCRConfig)
     glossary: list = field(default_factory=list)  # 运行时注入，不持久化
 
 
@@ -101,6 +110,10 @@ _TYPE_COERCIONS: dict[str, dict[str, type]] = {
         "enabled": bool,
         "min_chars": int,
         "auto_hide_ms": int,
+    },
+    "ocr": {
+        "enabled": bool,
+        "min_chars": int,
     },
 }
 

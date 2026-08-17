@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "tram"
@@ -23,6 +23,13 @@ dev = [
     "mypy>=1.10",
     "respx>=0.21",
     "pyinstaller>=6.0",
+]
+# OCR 为可选依赖：纯划词用户不被迫装 ~150MB 引擎栈。
+# rapidocr 2→3 换过 result.txts API，上界挡 breaking change；
+# onnxruntime 1.24.1 是 cp314 wheel 起点（CI 的 3.12 亦满足）。
+ocr = [
+    "rapidocr>=3.9,<4",
+    "onnxruntime>=1.24.1",
 ]
 
 [project.gui-scripts]
@@ -50,6 +57,12 @@ warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true  # PyQt6/pywin32 无 stub
 check_untyped_defs = true
+
+# OCR 引擎栈：rapidocr 间接拖入 numpy，其 stub 使用 3.12+ 语法，
+# 与 mypy 3.10 目标不兼容；不跟随类型，一律按 Any 处理
+[[tool.mypy.overrides]]
+module = ["rapidocr.*"]
+follow_imports = "skip"
 
 # ---------- pytest ----------
 [tool.pytest.ini_options]

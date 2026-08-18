@@ -1,10 +1,10 @@
-# Tram — 离线划词翻译
+# Tram — 离线划词/识图翻译
 
-买了一个带NPU的笔记本电脑，发现基本没什么用。为了给我花钱买的NPU找事做，我搓了这个可以接入本地模型的划词翻译软件，分享给有需要的朋友。
+买了一个带NPU的笔记本电脑，发现基本没什么用。为了给我花钱买的NPU找事做，我搓了这个可以接入本地模型的离线翻译软件，分享给有需要的朋友。
 
-接入本地大模型（Ollama / LM Studio / vLLM 等任意 OpenAI 兼容后端）的**纯离线**划词翻译工具。
+接入本地大模型（Ollama / LM Studio / vLLM 等任意 OpenAI 兼容后端）的**纯离线**翻译工具：划词翻译 + OCR 识图翻译。
 
-选中文本 → 按热键 → 悬浮窗流式显示译文。全程本地运行，不联网、不上传。
+选中文本（或框选屏幕区域）→ 按热键 → 悬浮窗流式显示译文。全程本地运行，不联网、不上传。
 
 ## 功能
 
@@ -58,6 +58,7 @@ pip install ".[ocr]"
 | 识图翻译 | 按 `Ctrl+Shift+F4` 框选屏幕区域（可在设置中修改） |
 | 关闭悬浮窗 | 点击 ✕ 或点击窗口外部 |
 | 拖动悬浮窗 | 按住任意空白区域拖动 |
+| 切换目标语言 | 托盘菜单 → 目标语言（切换后自动测试连接并通知结果） |
 | 切换模型 | 托盘菜单 → 设置 |
 | 退出程序 | 托盘菜单 → 退出 |
 
@@ -92,14 +93,16 @@ app/
 │   ├── selection.py            # 模拟 Ctrl+C 取词 + 剪贴板恢复
 │   └── translator.py           # 翻译编排
 └── ui/
-    ├── main_window.py          # 托盘常驻主窗口
-    ├── popup.py                # 悬浮窗
-    ├── region_overlay.py       # 全屏框选覆盖层
+    ├── main_window.py          # 托盘常驻主窗口（含「关于」页）
+    ├── base_translator.py      # 热键翻译编排器公共骨架（后端/热键生命周期、去重缓存、取消）
     ├── selection_translator.py # 划词翻译编排器
     ├── ocr_translator.py       # OCR 识图翻译编排器
+    ├── popup.py                # 悬浮窗
+    ├── region_overlay.py       # 全屏框选覆盖层
     ├── settings_dialog.py      # 设置对话框
     ├── glossary_dialog.py      # 术语表编辑
-    └── worker.py               # 翻译/OCR 后台线程
+    ├── worker.py               # 翻译/OCR/连接测试后台线程
+    └── worker_util.py          # 僵尸 QThread 包装器免疫
 ```
 
 ## 路线图

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tram"
 dynamic = ["version"]  # 版本唯一来源为 app.__version__
-description = "Tram - 离线划词翻译，接入本地大模型"
+description = "Tram - 离线划词/识图翻译，接入本地大模型"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

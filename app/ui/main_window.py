@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
         )
 
         # 一句话描述
-        desc_label = QLabel("离线划词翻译，接入本地大模型")
+        desc_label = QLabel("离线划词/识图翻译，接入本地大模型")
         desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         desc_label.setStyleSheet(
             "font-size: 14px; color: #c0c4cc; margin-top: 18px;"
@@ -140,6 +140,7 @@ class MainWindow(QMainWindow):
         )
         features = [
             "全局热键取词 — 选中文本按热键即译",
+            "OCR 识图翻译 — 框选屏幕区域，识别图文即译",
             "流式悬浮窗 — 译文边生成边显示",
             "系统托盘常驻 — 后台静默运行",
             "多后端切换 — Ollama / LM Studio / vLLM",
@@ -203,7 +204,7 @@ class MainWindow(QMainWindow):
         self._tray_icon = QSystemTrayIcon(self)
         pixmap = self._make_tray_icon()
         self._tray_icon.setIcon(QIcon(pixmap))
-        self._tray_icon.setToolTip("Tram 划词翻译")
+        self._tray_icon.setToolTip("Tram 离线翻译")
 
         menu = QMenu()
         self._act(menu.addAction("关于 Tram"), self._show_from_tray)

@@ -30,7 +30,9 @@ class SelectionTranslator(BaseHotkeyTranslator):
         #    backend 为共享实例，并发请求的连接与取消事件会互相干扰
         if not self._cancel_workers():
             if self._popup:
-                self._popup.show_error("上一次翻译仍在结束中，请稍后重试")
+                self._popup.show_error(
+                    "上一次翻译仍在结束中，请稍后重试", can_retry=False
+                )
             return
         if self._popup:
             self._popup.hide()

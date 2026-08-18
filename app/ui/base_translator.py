@@ -159,6 +159,8 @@ class BaseHotkeyTranslator(QObject):
         )
         # 用户点关闭按钮时真正取消翻译：中断请求、释放被占用的后端
         self._popup.close_requested.connect(self._cancel_workers)
+        # 用户点重试按钮时：取消当前翻译并用同一文本重新翻译
+        self._popup.retry_requested.connect(self._on_retry_requested)
         return self._popup
 
     # ---------- 翻译 worker ----------
@@ -169,6 +171,7 @@ class BaseHotkeyTranslator(QObject):
         返回 False 表示仍有线程未死透，此时不应在同一 backend 上
         发起新请求（共享连接与取消事件会互相干扰）。
         """
+        self._pending_text = ""  # 新流程/取消后旧文本不再待翻译
         w = self._worker
         self._worker = None  # 先清引用：即使后续抛异常也不会残留僵尸
         if w is None:
@@ -210,7 +213,7 @@ class BaseHotkeyTranslator(QObject):
         """
         self._pending_text = text
         if self._popup:
-            self._popup.show_loading()
+            self._popup.show_loading(can_retry=True)
         self._worker = TranslateWorker(self._backend, self._config, text)
         if self._popup:
             self._worker.token.connect(self._popup.append_token)
@@ -224,6 +227,23 @@ class BaseHotkeyTranslator(QObject):
         self._worker.start()
 
     # ---------- 翻译回调 ----------
+    def _on_retry_requested(self) -> None:
+        """浮窗重试按钮：取消进行中的翻译，用同一文本重新翻译。
+
+        覆盖两类场景：失败后重试（_on_translate_failed 已清去重缓存）
+        与慢加载时主动重发（取消会中断阻塞在模型加载上的请求）。
+        """
+        text = self._pending_text  # 先取：_cancel_workers 会清空
+        if not text:
+            return
+        if not self._cancel_workers():
+            if self._popup:
+                self._popup.show_error(
+                    "上一次翻译仍在结束中，请稍后重试", can_retry=False
+                )
+            return
+        self._begin_translation(text)
+
     def _on_translate_success(self, result: str) -> None:
         # 成功后才记录去重文本与译文缓存
         self._last_text = self._pending_text
@@ -240,7 +260,8 @@ class BaseHotkeyTranslator(QObject):
 
     def _on_translate_retry(self) -> None:
         if self._popup:
-            self._popup.show_loading()
+            # 内部自动重试仍处于翻译阶段，保留手动重试入口
+            self._popup.show_loading(can_retry=True)
 
     # ---------- 去重缓存 ----------
     def invalidate_last_text(self) -> None:

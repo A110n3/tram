@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import time
+
 from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QGuiApplication
 from PyQt6.QtWidgets import (
@@ -43,6 +45,9 @@ class TranslationPopup(QFrame):
     # 用户点 ✕：请求取消当前翻译（隐藏窗口由本类自行处理）
     close_requested = pyqtSignal()
 
+    # 用户点 ⟳：请求取消当前翻译并用同一文本重新翻译
+    retry_requested = pyqtSignal()
+
     def __init__(self, auto_hide_ms: int = 0, parent=None):
         super().__init__(
             parent,
@@ -54,15 +59,20 @@ class TranslationPopup(QFrame):
         self._auto_hide_ms = auto_hide_ms
         self._drag_pos: QPoint | None = None
         self._loading_text = "翻译中…"  # 当前 loading 占位文案（OCR 用"识别中…"）
+        self._load_started = 0.0  # show_loading 时刻，慢提示据此计算等待秒数
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.hide)
 
-        # 慢响应提示：翻译开始后长时间无 token 时改提示文案
+        # 慢响应提示：翻译开始后 8s 无 token 先给出提示，
+        # 随后每秒刷新已等待秒数（后端加载模型可长达数分钟，
+        # 静止不变的文案会让用户误以为界面冻住）
         self._slow_hint_timer = QTimer(self)
         self._slow_hint_timer.setSingleShot(True)
         self._slow_hint_timer.timeout.connect(self._show_slow_hint)
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.timeout.connect(self._update_slow_hint)
 
         self._build_ui()
         self._apply_style()
@@ -92,8 +102,20 @@ class TranslationPopup(QFrame):
         close_btn.setObjectName("TramClose")
         close_btn.clicked.connect(self._on_close_clicked)
 
+        # 重试按钮：仅翻译阶段（慢提示/失败）显示，OCR 识别阶段隐藏
+        retry_btn = QPushButton("⟳")
+        retry_btn.setFixedSize(20, 20)
+        retry_btn.setFlat(True)
+        retry_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        retry_btn.setObjectName("TramRetry")
+        retry_btn.setToolTip("重新翻译")
+        retry_btn.clicked.connect(self._on_retry_clicked)
+        retry_btn.hide()
+        self._retry_btn = retry_btn
+
         header.addWidget(drag_hint)
         header.addStretch()
+        header.addWidget(retry_btn)
         header.addWidget(close_btn)
 
         # 译文：QLabel 放入 QScrollArea，内容过长时垂直滚动
@@ -134,6 +156,8 @@ class TranslationPopup(QFrame):
             "  border-radius: 10px; }"
             "#TramClose { color: #788090; font-size: 13px; border: none; }"
             "#TramClose:hover { color: #e8e8ec; }"
+            "#TramRetry { color: #788090; font-size: 13px; border: none; }"
+            "#TramRetry:hover { color: #e8e8ec; }"
             "QLabel { color: #e8e8ec; font-size: 13px; }"
             'QLabel[role="target"] { color: #f5f6f8; font-size: 14px; }'
             "QScrollArea { border: none; background: transparent; }"
@@ -150,8 +174,15 @@ class TranslationPopup(QFrame):
         )
 
     # ---------- 内容 ----------
-    def show_loading(self, label: str = "翻译中…") -> None:
+    def show_loading(self, label: str = "翻译中…", can_retry: bool = False) -> None:
+        """进入加载态。can_retry：是否允许重试（翻译阶段）。
+
+        OCR 识别阶段不可重试（RapidOCR 进程内推理无法中断，
+        重新识别直接再按热键框选即可），翻译阶段可中断重发。
+        """
         self._loading_text = label  # append_token/慢提示据此识别占位文案
+        self._load_started = time.monotonic()
+        self._retry_btn.setVisible(can_retry)
         self._target_label.setStyleSheet("")  # 清除错误样式
         self._target_label.setText(label)
         self._scroll_to_top()
@@ -161,7 +192,8 @@ class TranslationPopup(QFrame):
 
     def append_token(self, token: str) -> None:
         """流式追加译文。仅当用户未向上翻看时自动跟随到底部。"""
-        self._slow_hint_timer.stop()
+        self._stop_loading_hints()
+        self._retry_btn.hide()  # 已有产出，重试无意义
         bar = self._vbar
         stick_to_bottom = bar.value() >= bar.maximum() - 4
 
@@ -176,7 +208,8 @@ class TranslationPopup(QFrame):
             QTimer.singleShot(0, self._scroll_to_bottom)
 
     def set_translation(self, text: str) -> None:
-        self._slow_hint_timer.stop()
+        self._stop_loading_hints()
+        self._retry_btn.hide()
         bar = self._vbar
         stick_to_bottom = bar.value() >= bar.maximum() - 4
         self._target_label.setText(text)
@@ -184,8 +217,11 @@ class TranslationPopup(QFrame):
         if stick_to_bottom:
             QTimer.singleShot(0, self._scroll_to_bottom)
 
-    def show_error(self, message: str) -> None:
-        self._slow_hint_timer.stop()
+    def show_error(self, message: str, can_retry: bool = True) -> None:
+        """错误态。can_retry：翻译类错误默认允许重试；OCR 识别失败 /
+        "仍在结束中"等死路错误传 False（重试无意义或无待重试文本）。"""
+        self._stop_loading_hints()
+        self._retry_btn.setVisible(can_retry)
         self._target_label.setText(f"❌ {message}")
         self._target_label.setStyleSheet("color: #e0a3a3;")
         self._scroll_to_top()
@@ -193,19 +229,41 @@ class TranslationPopup(QFrame):
         self._show()
 
     def _show_slow_hint(self) -> None:
-        """等待首个 token 超时：提示后端可能在加载模型。"""
+        """等待首个 token 超时：提示后端可能在加载模型，开始每秒计时。"""
         if not self._target_label.text().startswith(self._loading_text):
             return  # 已有译文/报错则不覆盖
+        self._update_slow_hint()
+        self._elapsed_timer.start(1000)
+
+    def _update_slow_hint(self) -> None:
+        """每秒刷新等待秒数：让用户确认仍在等待而非界面冻住。"""
+        if not self._target_label.text().startswith(self._loading_text):
+            self._elapsed_timer.stop()  # 状态已被 token/错误接管，兜底停表
+            return
+        elapsed = max(int(time.monotonic() - self._load_started), 1)
         self._target_label.setText(
-            f"{self._loading_text}（等待后端响应，可能在加载模型）"
+            f"{self._loading_text}（后端可能在加载模型，已等待 {elapsed}s）"
         )
         self._adjust_height()
 
+    def _stop_loading_hints(self) -> None:
+        """停止慢提示与等待计时（有产出/终态时调用）。"""
+        self._slow_hint_timer.stop()
+        self._elapsed_timer.stop()
+
     def _on_close_clicked(self) -> None:
         """✕：通知外部取消翻译，并隐藏窗口。"""
-        self._slow_hint_timer.stop()
+        self._stop_loading_hints()
+        self._retry_btn.hide()
         self.close_requested.emit()
         self.hide()
+
+    def _on_retry_clicked(self) -> None:
+        """⟳：通知外部取消当前翻译并用同一文本重新翻译。
+
+        不改本地状态：外部随即调用 show_loading 重置加载态。
+        """
+        self.retry_requested.emit()
 
     def show_capturing(self) -> None:
         """热键触发后立即展示最小窗口，提示"正在捕获"。
@@ -231,7 +289,8 @@ class TranslationPopup(QFrame):
 
         与完整翻译流程的终态一致：可复制、可滚动、失焦自动隐藏。
         """
-        self._slow_hint_timer.stop()
+        self._stop_loading_hints()
+        self._retry_btn.hide()
         self._target_label.setStyleSheet("")  # 清除错误样式
         self._target_label.setText(text)
         self._scroll_to_top()
@@ -239,7 +298,8 @@ class TranslationPopup(QFrame):
 
     def fade_out(self, text: str = "未检测到选中文本") -> None:
         """短暂显示提示文案后自动隐藏（捕获失败/无识别结果）。"""
-        self._slow_hint_timer.stop()
+        self._stop_loading_hints()
+        self._retry_btn.hide()
         self._target_label.setText(text)
         self._target_label.setStyleSheet("color: #9aa0ac;")
         self._scroll_to_top()
@@ -319,7 +379,7 @@ class TranslationPopup(QFrame):
     # ---------- 失焦隐藏 ----------
     def changeEvent(self, event) -> None:
         if self._auto_hide_ms <= 0 and event.type() == QEvent.Type.WindowDeactivate:
-            self._slow_hint_timer.stop()
+            self._stop_loading_hints()
             self.hide()
         super().changeEvent(event)
 

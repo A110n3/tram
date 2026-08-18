@@ -45,7 +45,9 @@ class OCRTranslator(BaseHotkeyTranslator):
         # 1. 清理进行中的 worker 与残留覆盖层；旧翻译线程未死透则拒绝本轮
         if not self._cancel_workers():
             if self._popup:
-                self._popup.show_error("上一次翻译仍在结束中，请稍后重试")
+                self._popup.show_error(
+                    "上一次翻译仍在结束中，请稍后重试", can_retry=False
+                )
             return
         if self._popup:
             self._popup.hide()
@@ -163,7 +165,8 @@ class OCRTranslator(BaseHotkeyTranslator):
     def _on_ocr_failed(self, message: str) -> None:
         self._ocr_worker = None
         if self._popup:
-            self._popup.show_error(message)
+            # OCR 识别失败无待重试文本（识别阶段不可中断重发）
+            self._popup.show_error(message, can_retry=False)
 
     # ---------- worker 取消 ----------
     def _cancel_workers(self) -> bool:

@@ -44,18 +44,21 @@ class MainWindow(QMainWindow):
         # 划词翻译服务
         self._selection_translator = SelectionTranslator(self._config)
         self._selection_translator.hotkey_status.connect(
-            lambda ok, msg: self._on_hotkey_status(ok, msg, "Tram 划词")
+            lambda ok, msg: self._on_hotkey_status(ok, msg, "划词")
         )
 
         # OCR 识图翻译服务
         self._ocr_translator = OCRTranslator(self._config)
         self._ocr_translator.hotkey_status.connect(
-            lambda ok, msg: self._on_hotkey_status(ok, msg, "Tram OCR")
+            lambda ok, msg: self._on_hotkey_status(ok, msg, "OCR")
         )
 
         # 切换目标语言后的连接测试线程
         self._lang_test_worker: TestConnectionWorker | None = None
         self._lang_test_lang: str = ""
+
+        # 各服务最新状态：合并进唯一一条托盘通知展示（见 _show_aggregated_status）
+        self._statuses: dict[str, tuple[bool, str]] = {}
 
         # 托盘
         self._create_tray()
@@ -67,7 +70,7 @@ class MainWindow(QMainWindow):
         ):
             self._selection_translator.start()
         else:
-            self._notify("Tram 划词", "点击托盘图标开启划词翻译")
+            self._show_aggregated_status(extra="点击托盘图标开启划词翻译")
 
         # 启动 OCR 识图翻译（如果已启用）
         if self._config.get("ocr", {}).get("enabled", get_default("ocr", "enabled")):
@@ -270,28 +273,46 @@ class MainWindow(QMainWindow):
             if menu is not None:
                 menu.exec(QCursor.pos())
 
-    def _notify(
+    def _show_aggregated_status(
         self,
-        title: str,
-        message: str,
-        icon: QSystemTrayIcon.MessageIcon = QSystemTrayIcon.MessageIcon.Information,
-        msecs: int = 3000,
+        extra: str = "",
+        icon: QSystemTrayIcon.MessageIcon | None = None,
     ) -> None:
-        """统一的系统通知封装：msecs 后自动消失。
+        """把所有服务状态合并进唯一一条托盘通知展示。
 
-        PyQt6 的 QSystemTrayIcon 无 hideMessage API，隐藏交给
-        showMessage 的 msecs 参数（Windows toast 由系统管理生命周期）。
+        Windows 托盘通知会互相顶替、同一时刻只能看见一条：
+        分条发送时后发的会把先发的挤没（且 msecs 参数被忽略，
+        展示时长由系统管理）。合并成一条后不存在互相顶替，
+        状态更新时用新内容整体替换旧通知，用户一眼看到全部状态。
+
+        extra: 一次性附加信息（如目标语言切换结果），不记入
+        _statuses，仅随本次展示。
         """
-        self._tray_icon.showMessage(title, message, icon, msecs)
+        lines = [f"{service}：{msg}" for service, (_ok, msg) in self._statuses.items()]
+        if extra:
+            lines.append(extra)
+        if not lines:
+            return
+        if icon is None:
+            failed = any(not ok for ok, _ in self._statuses.values())
+            icon = (
+                QSystemTrayIcon.MessageIcon.Warning
+                if failed
+                else QSystemTrayIcon.MessageIcon.Information
+            )
+        self._tray_icon.showMessage("Tram", "\n".join(lines), icon)
 
     def _toggle_selection(self) -> None:
         enabled = self._selection_action.isChecked()
         self._config.setdefault("selection", {})["enabled"] = enabled
         save_config(self._config)
         if enabled:
+            # 开启结果由 hotkey_status 信号记入状态并展示
             self._selection_translator.start()
         else:
             self._selection_translator.stop()
+            self._statuses["划词"] = (True, "已关闭")
+            self._show_aggregated_status()
         self._apply_selection_config()
 
     def _toggle_ocr(self) -> None:
@@ -302,6 +323,8 @@ class MainWindow(QMainWindow):
             self._ocr_translator.start()
         else:
             self._ocr_translator.stop()
+            self._statuses["OCR"] = (True, "已关闭")
+            self._show_aggregated_status()
         self._apply_selection_config()
 
     def _on_target_lang_changed(self, action: QAction) -> None:
@@ -355,15 +378,18 @@ class MainWindow(QMainWindow):
 
     def _on_lang_test_ok(self, _reply: str) -> None:
         self._lang_test_worker = None
-        self._notify("Tram 划词", f"目标语言已切换为 {self._lang_test_lang}")
+        self._show_aggregated_status(
+            extra=f"目标语言已切换为 {self._lang_test_lang}"
+        )
 
     def _on_lang_test_err(self, message: str) -> None:
         self._lang_test_worker = None
-        self._notify(
-            "Tram 划词",
-            f"目标语言已切换为 {self._lang_test_lang}，"
-            f"但模型连接测试失败：\n{message.strip()[:120]}",
-            QSystemTrayIcon.MessageIcon.Warning,
+        self._show_aggregated_status(
+            extra=(
+                f"目标语言已切换为 {self._lang_test_lang}，"
+                f"但模型连接测试失败：\n{message.strip()[:120]}"
+            ),
+            icon=QSystemTrayIcon.MessageIcon.Warning,
         )
 
     def _apply_selection_config(self) -> None:
@@ -382,15 +408,14 @@ class MainWindow(QMainWindow):
         ocr_on = "开" if ocr_enabled else "关"
         self._tray_icon.setToolTip(f"Tram - 划词: {sel_on} | OCR: {ocr_on}")
 
-    def _on_hotkey_status(
-        self, ok: bool, message: str, title: str = "Tram 划词"
-    ) -> None:
-        # 消息原样展示：注册失败消息自带「热键 X 注册失败」表述，
-        # 引导类消息（如 OCR 引擎未安装）不是注册失败，不能加前缀
-        if ok:
-            self._notify(title, message)
-        else:
-            self._notify(title, message, QSystemTrayIcon.MessageIcon.Warning)
+    def _on_hotkey_status(self, ok: bool, message: str, service: str) -> None:
+        """热键注册结果/引导消息：记入该服务状态，合并展示。
+
+        消息原样记录：注册失败消息自带「热键 X 注册失败」表述，
+        引导类消息（如 OCR 引擎未安装）不是注册失败，不能加前缀。
+        """
+        self._statuses[service] = (ok, message)
+        self._show_aggregated_status()
 
     # ---------- 菜单 ----------
     def open_settings(self) -> None:

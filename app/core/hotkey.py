@@ -123,6 +123,14 @@ class GlobalHotkeyThread(QThread):
             self._stop_event = None
 
     def run(self) -> None:
+        # __init__ 中 CreateEvent 失败的降级重试：此刻已在监听线程内。
+        # 若仍失败，线程还能靠消息（WM_QUIT）退出，request_quit 则无效。
+        if self._stop_event is None:
+            try:
+                self._stop_event = win32event.CreateEvent(None, True, False, None)
+            except pywintypes.error:
+                logger.debug("CreateEvent 重试失败，停止仅依赖 WM_QUIT", exc_info=True)
+
         try:
             modifiers, vk = parse_hotkey(self._spec)
         except HotkeyError as e:

@@ -21,16 +21,11 @@ logger = logging.getLogger(__name__)
 # 选区高度（设备无关像素）低于此值时放大，提升小字号识别率
 _MIN_UPSCALE_HEIGHT = 60
 
-# 语言映射：RapidOCR 的 `ch` 模型即中英混排模型，对纯英文也够用，
-# 故 eng 一并归 ch（v2 若在意可切 en 专用模型）；旧 Tesseract 语言码
-# 兼容迁移。jpn/kor 等专用模型暂不引入（路线图）。
-# 值当前全为 "ch"（引擎默认模型），v2 引入多语言模型时按值切换。
-_LANG_ALIASES: dict[str, str] = {
-    "ch": "ch",
-    "eng": "ch",
-    "chi_sim+eng": "ch",
-    "chi_tra+eng": "ch",
-}
+# 支持的语言码：RapidOCR 的 `ch` 模型即中英混排模型，对纯英文也够用，
+# 故 eng 一并归入（旧 Tesseract 语言码兼容迁移）。当前全部落到引擎默认
+# 模型，无需映射值；v2 引入多语言模型时再升级为 {码: 模型} 映射。
+# jpn/kor 等专用模型暂不引入（路线图）。
+_SUPPORTED_LANGS = frozenset({"ch", "eng", "chi_sim+eng", "chi_tra+eng"})
 
 
 class OCRError(Exception):
@@ -119,7 +114,7 @@ def ocr_bytes(png: bytes, languages: str = "ch") -> str:
     """
     if not is_rapidocr_available():
         raise OCRError('OCR 引擎未安装，请运行 pip install "tram[ocr]"')
-    if languages.strip().lower() not in _LANG_ALIASES:
+    if languages.strip().lower() not in _SUPPORTED_LANGS:
         raise OCRError(f"OCR 语言暂不支持: {languages}（当前仅 ch 中英混排）")
     engine = _get_engine()
     try:

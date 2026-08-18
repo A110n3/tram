@@ -127,6 +127,37 @@ def test_connection_merge_system():
     assert sent['messages'][0]['role'] == 'user'
 
 
+def test_build_test_messages_structure():
+    """连接测试消息与真实翻译结构一致；use_system_role=False 时并入 user。"""
+    from app.core.backend import build_test_messages
+
+    msgs = build_test_messages()
+    assert [m["role"] for m in msgs] == ["system", "user"]
+
+    merged = build_test_messages(use_system_role=False)
+    assert len(merged) == 1
+    assert merged[0]["role"] == "user"
+
+
+def test_interruptible_sleep():
+    """未取消时睡满返回 False；cancel() 后立即唤醒返回 True。"""
+    import time
+
+    backend = OpenAIBackend('https://example.com/v1', 'key', 'test')
+    try:
+        t0 = time.monotonic()
+        assert backend.interruptible_sleep(0.05) is False
+        assert time.monotonic() - t0 >= 0.04
+
+        backend.cancel()
+        t0 = time.monotonic()
+        assert backend.interruptible_sleep(60) is True
+        # 应立即返回，而不是睡满 60s
+        assert time.monotonic() - t0 < 5
+    finally:
+        backend.close()
+
+
 @respx.mock
 def test_list_models_parses_data():
     """GET /models 解析 data 列表中的模型 id，去重并跳过无效项。"""

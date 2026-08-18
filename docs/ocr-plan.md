@@ -61,7 +61,7 @@
   **锁只护 init、不护推理**（onnxruntime 的 Run 自身线程安全；当前仅单 Worker，串行无影响），docstring 注明防止后人把整个 `ocr_bytes` 包进锁
 - `ocr_bytes`：`engine(png)` → `result is None or not result.txts` 返回 `""` → 否则 `clean_output("\n".join(result.txts))`；异常包装为 `OCRError`
 - **不设硬超时**（进程内推理无法外部 kill；ONNX 推理有界，正常截图 <2s；popup「识别中…」已覆盖等待体验，极端情况 v2 再议）——写入 docstring
-- **语言映射** `_LANG_ALIASES`：`ch` 为新默认（PP-OCRv4 ch 模型 = 中英混排）；旧 Tesseract 值兼容迁移 `chi_sim+eng`/`chi_tra+eng`/`eng` → `ch`；jpn/kor 等预留不支持（路线图）。`eng` 也归 `ch` 为有意取舍：ch 模型对纯英文够用；若 v2 在意可切 en 专用模型
+- **支持语言码** `_SUPPORTED_LANGS`（frozenset；初版为 `_LANG_ALIASES` 映射，因值全指向引擎默认模型、映射从未被读取，评审后简化为集合）：`ch` 为新默认（PP-OCRv4 ch 模型 = 中英混排）；旧 Tesseract 值兼容迁移 `chi_sim+eng`/`chi_tra+eng`/`eng` → `ch`；jpn/kor 等预留不支持（路线图）。`eng` 也归 `ch` 为有意取舍：ch 模型对纯英文够用；若 v2 在意可切 en 专用模型，届时升级为 {码: 模型} 映射
 - 删除 find_tesseract/_vendor_dirs/_build_args/_env_for/OCR_TIMEOUT_S/PSM_AUTO
 
 ### 配置与版本
@@ -115,7 +115,7 @@
 | collect_all 收集不全（中） | 打包后实测，按上条回退 |
 | 首次 OCR init 数秒被误认为卡死（中） | popup「识别中…」已覆盖；可在托盘通知提示首次需加载模型 |
 | onnxruntime 与 PyQt6 DLL 冲突（低） | 冒烟阶段两者同进程 import 即验证 |
-| 旧 config `chi_sim+eng`（低） | `_LANG_ALIASES` 映射兜底 |
+| 旧 config `chi_sim+eng`（低） | `_SUPPORTED_LANGS` 兼容兜底 |
 
 ## 附：关键调研事实（2026-08-17）
 

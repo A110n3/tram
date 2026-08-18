@@ -1,11 +1,13 @@
 """翻译后台工作线程。
 
 TranslateWorker 在 QThread 中执行 Translator.translate()，
-通过信号与 UI 通信（流式 token、分块进度、重试、失败）。
-主窗口和划词翻译均复用此 worker。
+通过信号与 UI 通信（流式 token、重试、失败）。
+划词与 OCR 翻译编排器（base_translator）均复用此 worker。
 
 取消翻译时调用 backend.cancel() 中断底层 HTTP 连接，
-无需等待下一个 token 才生效。
+无需等待下一个 token 才生效；Translator 由 worker 内部创建并
+绑定 should_stop（即本 worker 的停止标志），覆盖退避 sleep 等
+cancel() 无法触及的窗口期。
 """
 
 from __future__ import annotations
@@ -14,7 +16,11 @@ import logging
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from ..core.backend import BackendError, fetch_models, test_connection
+from ..core.backend import (
+    BackendError,
+    OpenAIBackend,
+    build_test_messages,
+)
 from ..core.ocr import ocr_bytes
 from ..core.translator import Translator
 
@@ -31,9 +37,10 @@ class TranslateWorker(QThread):
     succeeded = pyqtSignal(str)
     failed = pyqtSignal(str)
 
-    def __init__(self, translator: Translator, text: str, parent=None):
+    def __init__(self, backend: OpenAIBackend, config: dict, text: str, parent=None):
         super().__init__(parent)
-        self._translator = translator
+        self._backend = backend
+        self._config = config
         self._text = text
         self._stop_flag = False
 
@@ -42,18 +49,22 @@ class TranslateWorker(QThread):
         self._stop_flag = True
         # 原生取消：立即中断 httpx 流式读取，不等下一个 token
         try:
-            self._translator.backend.cancel()
+            self._backend.cancel()
         except Exception:
             logger.debug("backend.cancel 异常", exc_info=True)
 
     def run(self) -> None:
+        translator = Translator(
+            self._backend, self._config, should_stop=lambda: self._stop_flag
+        )
+
         def on_token(t: str) -> None:
             if self._stop_flag:
                 raise _StopRequested()
             self.token.emit(t)
 
         try:
-            result = self._translator.translate(
+            result = translator.translate(
                 self._text,
                 on_token=on_token,
                 on_retry=self.retry.emit,
@@ -94,9 +105,11 @@ class OCRWorker(QThread):
 
 
 class TestConnectionWorker(QThread):
-    """后台执行 test_connection，避免阻塞 UI。
+    """后台执行连接测试，避免阻塞 UI。
 
     设置对话框的「测试连接」按钮与托盘菜单切换目标语言共用。
+    自持 backend 引用（而非调用 test_connection）以支持取消：
+    退出/重开对话框时可立即中断 30s 超时内的阻塞请求。
     """
 
     ok = pyqtSignal(str)
@@ -115,27 +128,47 @@ class TestConnectionWorker(QThread):
         self._api_key = api_key
         self._model = model
         self._use_system_role = use_system_role
+        self._stopped = False
+        self._backend: OpenAIBackend | None = None
+
+    def request_stop(self) -> None:
+        """请求停止：丢弃结果并中断进行中的请求。"""
+        self._stopped = True
+        b = self._backend
+        if b is not None:
+            try:
+                b.cancel()
+            except Exception:
+                logger.debug("测试连接 backend.cancel 异常", exc_info=True)
 
     def run(self) -> None:
+        backend = OpenAIBackend(self._base_url, self._api_key, self._model, timeout=30)
+        self._backend = backend
         try:
-            reply = test_connection(
-                self._base_url,
-                self._api_key,
-                self._model,
-                use_system_role=self._use_system_role,
+            reply = backend.chat(
+                build_test_messages(self._use_system_role),
+                temperature=0.0,
+                max_tokens=8,
             )
-            self.ok.emit(reply)
-        except BackendError as e:
-            self.err.emit(str(e))
+            if not self._stopped:
+                self.ok.emit(reply)
         except Exception as e:
-            logger.warning("测试连接异常", exc_info=True)
-            self.err.emit(str(e))
+            if not self._stopped:
+                if not isinstance(e, BackendError):
+                    logger.warning("测试连接异常", exc_info=True)
+                self.err.emit(str(e))
+        finally:
+            self._backend = None
+            try:
+                backend.close()
+            except Exception:
+                logger.debug("关闭测试连接 backend 异常", exc_info=True)
 
 
 class ListModelsWorker(QThread):
     """后台执行 list_models（GET /models），避免阻塞 UI。
 
-    设置对话框的「获取模型」按钮使用。
+    设置对话框的「获取模型」按钮使用。自持 backend 以支持取消。
     """
 
     ok = pyqtSignal(list)
@@ -145,13 +178,34 @@ class ListModelsWorker(QThread):
         super().__init__(parent)
         self._base_url = base_url
         self._api_key = api_key
+        self._stopped = False
+        self._backend: OpenAIBackend | None = None
+
+    def request_stop(self) -> None:
+        """请求停止：丢弃结果并中断进行中的请求。"""
+        self._stopped = True
+        b = self._backend
+        if b is not None:
+            try:
+                b.cancel()
+            except Exception:
+                logger.debug("获取模型 backend.cancel 异常", exc_info=True)
 
     def run(self) -> None:
+        backend = OpenAIBackend(self._base_url, self._api_key, timeout=15)
+        self._backend = backend
         try:
-            models = fetch_models(self._base_url, self._api_key)
-            self.ok.emit(models)
-        except BackendError as e:
-            self.err.emit(str(e))
+            models = backend.list_models()
+            if not self._stopped:
+                self.ok.emit(models)
         except Exception as e:
-            logger.warning("获取模型列表异常", exc_info=True)
-            self.err.emit(str(e))
+            if not self._stopped:
+                if not isinstance(e, BackendError):
+                    logger.warning("获取模型列表异常", exc_info=True)
+                self.err.emit(str(e))
+        finally:
+            self._backend = None
+            try:
+                backend.close()
+            except Exception:
+                logger.debug("关闭获取模型 backend 异常", exc_info=True)

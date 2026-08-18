@@ -1,10 +1,9 @@
 """OCR 识图翻译编排器。
 
-结构与 SelectionTranslator 一一对应：独立后端实例、独立热键线程
-（hotkey_id=2，与划词热键 id=1 区分）、独立去重缓存。
+公共骨架（后端/热键生命周期、去重缓存、翻译管线）见 base_translator；
+本类只保留 OCR 特有流程：热键 -> 截主屏 -> 全屏覆盖层框选 -> 裁剪
+-> OCRWorker 识别 -> 复用公共翻译管线 -> TranslationPopup 展示。
 
-流程：热键 -> 截主屏 -> 全屏覆盖层框选 -> 裁剪 -> OCRWorker 识别
--> 复用 TranslateWorker 流式翻译 -> TranslationPopup 展示。
 翻译管线（loading/流式/错误/缓存重显）与划词翻译完全共用。
 """
 
@@ -12,19 +11,15 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Callable
-from typing import Any, cast
 
-from PyQt6.QtCore import QObject, QRect, pyqtSignal
+from PyQt6.QtCore import QRect
 from PyQt6.QtGui import QGuiApplication, QPixmap
 
-from ..core.backend import OpenAIBackend
-from ..core.hotkey import GlobalHotkeyThread
+from ..config import get_default
 from ..core.ocr import is_rapidocr_available, pixmap_to_png
-from ..core.translator import Translator
-from .popup import TranslationPopup
+from .base_translator import BaseHotkeyTranslator
 from .region_overlay import RegionOverlay
-from .worker import OCRWorker, TranslateWorker
+from .worker import OCRWorker
 from .worker_util import track_worker
 
 logger = logging.getLogger(__name__)
@@ -33,98 +28,25 @@ logger = logging.getLogger(__name__)
 OCR_HOTKEY_ID = 2
 
 
-class OCRTranslator(QObject):
-    """管理 OCR 识图翻译全流程：热键 -> 框选 -> 识别 -> 翻译 -> 悬浮窗。
+class OCRTranslator(BaseHotkeyTranslator):
+    """管理 OCR 识图翻译全流程：热键 -> 框选 -> 识别 -> 翻译 -> 悬浮窗。"""
 
-    信号：
-        hotkey_status(bool, str): 热键/环境状态变化。
-            True + "已注册" / False + 错误或引导消息。
-    """
+    section = "ocr"
+    service_name = "OCR"
+    hotkey_id = OCR_HOTKEY_ID
 
-    hotkey_status = pyqtSignal(bool, str)
-
-    def __init__(self, config: dict, parent=None):
-        super().__init__(parent)
-        self._config = config
-        self._backend = self._make_backend()
-        self._popup: TranslationPopup | None = None
-        self._hotkey_thread: GlobalHotkeyThread | None = None
-        self._overlay: RegionOverlay | None = None
-        # 热键时刻截取的冻结截图：覆盖层背景与裁剪必须使用同一张
-        self._screenshot: QPixmap | None = None
-        self._ocr_worker: OCRWorker | None = None
-        self._worker: TranslateWorker | None = None
-        self._last_text: str = ""  # 最近一次成功翻译的 OCR 文本，用于去重
-        self._last_result: str = ""
-        self._pending_text: str = ""
-
-    # ---------- 后端 ----------
-    def _make_backend(self) -> OpenAIBackend:
-        b = self._config.get("backend", {})
-        return OpenAIBackend(
-            base_url=b.get("base_url", ""),
-            api_key=b.get("api_key", "ollama"),
-            model=b.get("model", ""),
-            timeout=int(b.get("timeout", 180)),
-        )
-
-    def _close_backend(self) -> None:
-        try:
-            self._backend.close()
-        except Exception:
-            logger.debug("关闭 backend 异常", exc_info=True)
-
-    # ---------- 开关 ----------
-    def start(self) -> None:
-        """注册全局热键，开启 OCR 模式。"""
-        ocr_cfg = self._config.get("ocr", {})
-        if not ocr_cfg.get("enabled", False):
-            return
-
-        self._detach_hotkey_thread()
-        if self._hotkey_thread is not None:
-            return  # 旧线程未退出，放弃本次注册，避免线程堆积
-
-        hotkey = ocr_cfg.get("hotkey", "Ctrl+Shift+F4")
-        self._hotkey_thread = GlobalHotkeyThread(hotkey, hotkey_id=OCR_HOTKEY_ID)
-        self._hotkey_thread.triggered.connect(self._on_hotkey)
-        self._hotkey_thread.registration_ok.connect(self._on_registration_ok)
-        self._hotkey_thread.registration_failed.connect(self._on_registration_failed)
-        self._hotkey_thread.start()
-
-    def _detach_hotkey_thread(self) -> None:
-        """停止并断开当前热键线程的所有信号连接。"""
-        if not self._hotkey_thread:
-            return
-        ht = self._hotkey_thread
-        for sig, slot in [
-            (ht.triggered, self._on_hotkey),
-            (ht.registration_ok, self._on_registration_ok),
-            (ht.registration_failed, self._on_registration_failed),
-        ]:
-            with contextlib.suppress(TypeError, RuntimeError):
-                sig.disconnect(cast("Callable[..., Any]", slot))
-        ht.request_quit()
-        if ht.wait(1000):
-            self._hotkey_thread = None
-
-    def stop(self) -> None:
-        """注销热键，取消当前识别/翻译，关闭覆盖层。"""
-        self._cancel_workers()
-        self._close_overlay()
-        self._detach_hotkey_thread()
-
-    def _on_registration_failed(self, msg: str) -> None:
-        self.hotkey_status.emit(False, msg)
-
-    def _on_registration_ok(self) -> None:
-        hotkey = self._config.get("ocr", {}).get("hotkey", "Ctrl+Shift+F4")
-        self.hotkey_status.emit(True, f"OCR 已开启，热键: {hotkey}")
+    # 热键时刻截取的冻结截图：覆盖层背景与裁剪必须使用同一张
+    _screenshot: QPixmap | None = None
+    _overlay: RegionOverlay | None = None
+    _ocr_worker: OCRWorker | None = None
 
     # ---------- 热键处理 ----------
     def _on_hotkey(self) -> None:
-        # 1. 清理旧 popup、进行中的 worker 与残留覆盖层
-        self._cancel_workers()
+        # 1. 清理进行中的 worker 与残留覆盖层；旧翻译线程未死透则拒绝本轮
+        if not self._cancel_workers():
+            if self._popup:
+                self._popup.show_error("上一次翻译仍在结束中，请稍后重试")
+            return
         if self._popup:
             self._popup.hide()
             self._popup = None
@@ -155,6 +77,7 @@ class OCRTranslator(QObject):
         overlay.raise_()
         overlay.activateWindow()
 
+    # ---------- 覆盖层 ----------
     def _close_overlay(self) -> None:
         """主动关闭覆盖层（新热键打断 / stop 路径）。"""
         ov = self._overlay
@@ -174,6 +97,10 @@ class OCRTranslator(QObject):
         """覆盖层 cancelled 信号：仅清引用，关闭由覆盖层自行完成。"""
         self._overlay = None
         self._screenshot = None
+
+    def _on_stopping(self) -> None:
+        """stop 钩子：停止时关闭选区覆盖层。"""
+        self._close_overlay()
 
     # ---------- 识别 ----------
     def _on_region(self, region: QRect) -> None:
@@ -204,12 +131,12 @@ class OCRTranslator(QObject):
             return
 
         # 弹窗在框选结束（鼠标释放）后出现，跟随当前光标定位
-        sel_cfg = self._config.get("selection", {})
-        self._popup = TranslationPopup(auto_hide_ms=sel_cfg.get("auto_hide_ms", 0))
-        self._popup.close_requested.connect(self._cancel_workers)
-        self._popup.show_loading("识别中…")
+        popup = self._new_popup()
+        popup.show_loading("识别中…")
 
-        languages = self._config.get("ocr", {}).get("languages", "ch")
+        languages = self._config.get("ocr", {}).get(
+            "languages", get_default("ocr", "languages")
+        )
         w = OCRWorker(png, languages)
         self._ocr_worker = w
         w.succeeded.connect(self._on_ocr_ok)
@@ -222,99 +149,38 @@ class OCRTranslator(QObject):
         if not self._popup:
             return
         stripped = text.strip()
-        min_chars = int(self._config.get("ocr", {}).get("min_chars", 2))
-        if len(stripped) < max(min_chars, 1):
+        min_chars = self._config.get("ocr", {}).get(
+            "min_chars", get_default("ocr", "min_chars")
+        )
+        if len(stripped) < max(int(min_chars), 1):
             self._popup.fade_out("未识别到文字")
             return
-        if stripped == self._last_text and self._last_result:
-            # 重复识别同一文本：重显缓存译文（与划词去重策略一致）
-            self._popup.show_cached(self._last_result)
+        if self._try_show_cached(stripped):
             return
-        # 失败不记录去重文本，允许立即重试同一段截图
-        self._pending_text = stripped
-
-        # 识别成功，进入共用翻译管线
-        self._popup.show_loading()
-        translator = Translator(self._backend, self._config)
-        self._worker = TranslateWorker(translator, stripped)
-        self._worker.token.connect(self._popup.append_token)
-        self._worker.succeeded.connect(self._on_translate_success)
-        self._worker.failed.connect(self._on_translate_failed)
-        self._worker.retry.connect(self._on_retry)
-        track_worker(self, "_worker", self._worker)
-        self._worker.start()
+        # 识别成功，进入公共翻译管线
+        self._begin_translation(stripped)
 
     def _on_ocr_failed(self, message: str) -> None:
         self._ocr_worker = None
         if self._popup:
             self._popup.show_error(message)
 
-    # ---------- 翻译回调 ----------
-    def _on_translate_success(self, result: str) -> None:
-        self._last_text = self._pending_text
-        self._last_result = result
-        if self._popup:
-            self._popup.set_translation(result)
-
-    def _on_translate_failed(self, message: str) -> None:
-        self._last_text = ""
-        self._last_result = ""
-        if self._popup:
-            self._popup.show_error(message)
-
-    def _on_retry(self) -> None:
-        if self._popup:
-            self._popup.show_loading()
-
-    # ---------- 去重缓存 ----------
-    def invalidate_last_text(self) -> None:
-        """清空去重缓存，设置/术语表/目标语言变化后强制重新翻译。"""
-        self._last_text = ""
-        self._last_result = ""
-
-    # ---------- 切换模型 ----------
-    def rebuild_backend(self) -> None:
-        """切换模型后重建后端并重新注册热键。"""
-        self.stop()
-        self._close_backend()
-        self._backend = self._make_backend()
-        self.start()
-
-    # ---------- 清理 ----------
-    def _cancel_workers(self) -> None:
-        """取消进行中的 OCR / 翻译 worker。
+    # ---------- worker 取消 ----------
+    def _cancel_workers(self) -> bool:
+        """扩展基类：先取消 OCR 识别 worker，再取消翻译 worker。
 
         先断信号再等待：RapidOCR 为进程内推理、不可外部中断，
-        断信号保证迟到结果不会污染新一轮流程；僵尸包装器免疫
-        与 SelectionTranslator._cancel_worker 相同。
+        断信号保证迟到结果不会污染新一轮流程。
         """
         w = self._ocr_worker
         self._ocr_worker = None
+        ocr_ok = True
         if w is not None:
             with contextlib.suppress(RuntimeError, TypeError):
                 w.succeeded.disconnect()
                 w.failed.disconnect()
             with contextlib.suppress(RuntimeError):  # C++ 对象已删除
-                w.wait(2000)
-
-        w2 = self._worker
-        self._worker = None
-        if w2 is None:
-            return
-        try:
-            w2.request_stop()
-            w2.wait(2000)
-        except RuntimeError:
-            return
-        try:
-            for sig in (w2.token, w2.succeeded, w2.failed, w2.retry):
-                sig.disconnect()
-        except (TypeError, RuntimeError):
-            pass
-
-    def shutdown(self) -> None:
-        self.stop()
-        if self._popup:
-            self._popup.hide()
-            self._popup = None
-        self._close_backend()
+                if not w.wait(2000):
+                    logger.warning("OCR 线程 2s 未退出")
+                    ocr_ok = False
+        return super()._cancel_workers() and ocr_ok

@@ -188,6 +188,14 @@ class OpenAIBackend:
                 models.append(mid)
         return models
 
+    def interruptible_sleep(self, seconds: float) -> bool:
+        """退避等待：被 cancel() 提前打断时返回 True。
+
+        cancel() 会设置 _cancel_event，Event.wait 随即返回，
+        正在退避重试的翻译线程无需睡满整个延迟即可退出。
+        """
+        return self._cancel_event.wait(seconds)
+
     def cancel(self) -> None:
         """中断进行中的流式请求，并保证后端对象之后仍可复用。
 
@@ -217,20 +225,26 @@ class OpenAIBackend:
         self.close()
 
 
-def test_connection(
-    base_url: str, api_key: str, model: str, use_system_role: bool = True
-) -> str:
-    """发送与真实翻译结构一致的最小请求，验证后端可用。
+def build_test_messages(use_system_role: bool = True) -> list[dict]:
+    """构造与真实翻译结构一致的最小测试请求消息。
 
-    使用 build_messages 构造消息（默认含 system 角色），
-    以便在设置阶段就发现不支持 system 消息的后端（此类后端
-    连接测试能通过简单请求、但真实翻译会返回 5xx）。
+    使用 build_messages 构造（默认含 system 角色），以便在设置阶段
+    就发现不支持 system 消息的后端（此类后端连接测试能通过简单请求、
+    但真实翻译会返回 5xx）。供 test_connection 与 TestConnectionWorker
+    共用，后者需要自持 backend 引用以支持取消。
     """
-    messages = build_messages(
+    return build_messages(
         "Hello",
         target_lang="中文（简体）",
         merge_system=not use_system_role,
     )
+
+
+def test_connection(
+    base_url: str, api_key: str, model: str, use_system_role: bool = True
+) -> str:
+    """发送最小测试请求，验证后端可用（消息结构见 build_test_messages）。"""
+    messages = build_test_messages(use_system_role)
     with OpenAIBackend(base_url, api_key, model, timeout=30) as backend:
         return backend.chat(messages, temperature=0.0, max_tokens=8)
 

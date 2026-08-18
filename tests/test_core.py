@@ -264,8 +264,9 @@ def test_translate_context_uses_translation_not_original():
                 on_token(f"译文{self.call_count}")
 
     backend = _CaptureBackend()
-    # 两段超长文本，确保分成两块
-    text = "第一段内容。" * 400 + "\n\n" + "第二段内容。" * 400
+    # 两段文本：各不超过 max_chars 下限（256），合计超出，确保分成两块
+    # （段落超过 max_chars 时会被按句拆分，无法再作为整块参与测试）
+    text = "第一段内容。" * 40 + "\n\n" + "第二段内容。" * 40
     config = {"backend": {}, "translation": {"chunk_chars": 200}}
     Translator(backend, config).translate(text)
 
@@ -293,7 +294,8 @@ def test_translate_join_preserves_paragraph_breaks():
                 on_token(f"块{self.call_count}")
 
     backend = _StubBackend()
-    text = "第一段。" * 400 + "\n\n" + "第二段。" * 400
+    # 每段 160 字符（<256 下限）不触发按句拆分；合计 322 > 256 分成两块
+    text = "第一段。" * 40 + "\n\n" + "第二段。" * 40
     config = {"backend": {}, "translation": {"chunk_chars": 200}}
     result = Translator(backend, config).translate(text)
     assert result == "块1\n\n块2"
@@ -326,6 +328,107 @@ def test_translate_propagates_stream_cancelled():
     assert raised, "StreamCancelled 应穿透 Translator.translate"
     # 只调用了一次：取消不应触发重试
     assert backend.call_count == 1
+
+
+def test_translate_should_stop_prevents_any_request():
+    """should_stop 已为 True 时不发起任何请求，直接抛 StreamCancelled。
+
+    回归防护（取消竞态）：cancel 后旧任务若仍存活，不得在共享
+    backend 上重新发起请求。
+    """
+
+    class _CountingBackend:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_stream(self, messages, temperature=0.2, max_tokens=2048, on_token=None):
+            self.calls += 1
+            if on_token:
+                on_token("ok")
+
+    backend = _CountingBackend()
+    translator = Translator(backend, {"backend": {}}, should_stop=lambda: True)
+    raised = False
+    try:
+        translator.translate("hello")
+    except StreamCancelled:
+        raised = True
+    assert raised
+    assert backend.calls == 0
+
+
+def test_translate_should_stop_between_chunks():
+    """多块翻译中 should_stop 变 True：后续块不再发起请求。"""
+
+    class _CountingBackend:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_stream(self, messages, temperature=0.2, max_tokens=2048, on_token=None):
+            self.calls += 1
+            if on_token:
+                on_token(f"块{self.calls}")
+
+    stop = {"flag": False}
+    backend = _CountingBackend()
+    # 两块文本（各 160 字符 < 256 下限，合计超限）
+    text = "第一段。" * 40 + "\n\n" + "第二段。" * 40
+    config = {"backend": {}, "translation": {"chunk_chars": 200}}
+    translator = Translator(backend, config, should_stop=lambda: stop["flag"])
+
+    def on_token(_t):
+        stop["flag"] = True  # 第一块流式输出时取消
+
+    raised = False
+    try:
+        translator.translate(text, on_token=on_token)
+    except StreamCancelled:
+        raised = True
+    assert raised
+    assert backend.calls == 1
+
+
+def test_translate_should_stop_blocks_retry():
+    """请求失败后若 should_stop 变 True：不进入退避重试。"""
+
+    class _FlakyBackend:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_stream(self, messages, temperature=0.2, max_tokens=2048, on_token=None):
+            self.calls += 1
+            stop["flag"] = True  # 首次失败时刻恰好被取消
+            raise BackendError("模拟瞬态失败", status_code=500)
+
+    stop = {"flag": False}
+    backend = _FlakyBackend()
+    translator = Translator(backend, {"backend": {}}, should_stop=lambda: stop["flag"])
+    retried = []
+    raised = False
+    try:
+        translator.translate("hello", on_retry=lambda: retried.append(1))
+    except StreamCancelled:
+        raised = True
+    assert raised
+    assert backend.calls == 1
+    assert not retried
+
+
+def test_backoff_sleep_fallback_without_interruptible_sleep():
+    """鸭子类型后端无 interruptible_sleep 时回退 time.sleep，返回 False。"""
+    import app.core.translator as tr
+
+    class _PlainBackend:
+        pass
+
+    sleeps: list[float] = []
+    orig = tr.time.sleep
+    tr.time.sleep = lambda s: sleeps.append(s)
+    try:
+        assert tr._backoff_sleep(_PlainBackend(), 1.5) is False
+    finally:
+        tr.time.sleep = orig
+    assert sleeps == [1.5]
 
 
 def test_translate_injects_glossary_into_prompt():
@@ -447,6 +550,58 @@ def test_grab_selection_releases_ctrl_when_c_down_fails():
         restore()
     assert result is None
     assert ("up", selmod.VK_CONTROL) in events
+
+
+def _grab_with_initial_clipboard(initial: str):
+    """以指定初始剪贴板内容执行一次取词，返回 (结果, set 调用序列)。"""
+    import app.core.selection as selmod
+
+    set_calls: list[str] = []
+    state = {"clipboard": initial}
+
+    def fake_set(text, retries=8):
+        set_calls.append(text)
+        state["clipboard"] = text
+        return True
+
+    def fake_read(retries=5):
+        return state["clipboard"]
+
+    def fake_send_key(vk, up=False):
+        # 模拟目标应用在按键抬起时把选区写入剪贴板
+        if vk == selmod.VK_C and up:
+            state["clipboard"] = "取到的文本"
+        return True
+
+    orig = {
+        name: getattr(selmod, name)
+        for name in (
+            "_wait_modifiers_released",
+            "_set_clipboard_text",
+            "_read_clipboard_text",
+            "_send_key",
+        )
+    }
+    selmod._wait_modifiers_released = lambda timeout_ms=300: None
+    selmod._set_clipboard_text = fake_set
+    selmod._read_clipboard_text = fake_read
+    selmod._send_key = fake_send_key
+    try:
+        return selmod.grab_selection(timeout_ms=200), set_calls
+    finally:
+        for name, fn in orig.items():
+            setattr(selmod, name, fn)
+
+
+def test_grab_selection_always_restores_clipboard():
+    """取词结束后总是恢复剪贴板：原为空则置空（不留取词残留），
+    原有内容则恢复原文。"""
+    for initial in ("", "原有内容"):
+        result, set_calls = _grab_with_initial_clipboard(initial)
+        assert result == "取到的文本"
+        # set 调用序列：[""(清空), initial(恢复)]，最后一步必须还原原内容
+        assert set_calls[0] == ""
+        assert set_calls[-1] == initial
 
 
 if __name__ == "__main__":

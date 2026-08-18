@@ -124,10 +124,8 @@ def grab_selection(timeout_ms: int = 400) -> str | None:
     # 清空失败时无法区分新旧内容，直接放弃
     if not _set_clipboard_text(""):
         logger.warning("剪贴板清空失败，跳过取词以避免误报")
-        if old:
-            _set_clipboard_text(old)  # 尽力恢复原内容
+        _set_clipboard_text(old)  # 尽力恢复原内容
         return None
-
     ctrl_pressed = False
     try:
         if not _send_key(VK_CONTROL, up=False):
@@ -158,6 +156,6 @@ def grab_selection(timeout_ms: int = 400) -> str | None:
         if ctrl_pressed:
             _send_key(VK_C, up=True)
             _send_key(VK_CONTROL, up=True)
-        # 尽力恢复原剪贴板；失败则静默
-        if old:
-            _set_clipboard_text(old)
+        # 尽力恢复原剪贴板文本；old 为空时置空文本，
+        # 避免取到的选中文本残留在剪贴板污染后续粘贴
+        _set_clipboard_text(old)

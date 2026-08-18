@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tram"
-version = "0.3.0"
+dynamic = ["version"]  # 版本唯一来源为 app.__version__
 description = "Tram - 离线划词翻译，接入本地大模型"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,6 +37,9 @@ tram = "app.main:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "app.__version__" }
 
 # ---------- ruff ----------
 [tool.ruff]

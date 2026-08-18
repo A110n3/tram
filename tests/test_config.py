@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 import app.config as cfg
-from app.config import TramConfig, load_config, save_config
+from app.config import TramConfig, get_default, load_config, save_config
 
 
 def test_tram_config_defaults():
@@ -242,6 +242,46 @@ def test_save_config_strips_runtime_glossary(tmp_path):
     finally:
         cfg.CONFIG_DIR = orig_dir
         cfg.CONFIG_FILE = orig_file
+
+
+def test_load_config_non_dict_section_falls_back_to_defaults():
+    """配置节被手动改成非 dict（字符串/列表等）时忽略并回退默认值。
+
+    回归防护：旧实现直接 cfg[section] = values，后续 .get().get() 链
+    会以 AttributeError 崩溃，与"配置损坏静默回退"的初衷不符。
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as tmp:
+        json.dump({
+            "backend": "oops",
+            "selection": ["enabled"],
+            "translation": 3,
+        }, tmp)
+        path = tmp.name
+
+    orig = cfg.CONFIG_FILE
+    cfg.CONFIG_FILE = Path(path)
+    try:
+        result = load_config()
+        assert isinstance(result["backend"], dict)
+        assert result["backend"]["base_url"] == "http://localhost:11434/v1"
+        assert result["selection"]["enabled"] is False
+        assert result["translation"]["chunk_chars"] == 2000
+        # 未涉及的节不受影响
+        assert result["ocr"]["hotkey"] == "Ctrl+Shift+F4"
+    finally:
+        cfg.CONFIG_FILE = orig
+        os.unlink(path)
+
+
+def test_get_default_matches_dataclass_defaults():
+    """get_default 是 dataclass 默认值的单一读取入口。"""
+    assert get_default("selection", "hotkey") == "Ctrl+F4"
+    assert get_default("ocr", "hotkey") == "Ctrl+Shift+F4"
+    assert get_default("translation", "chunk_chars") == 2000
+    assert get_default("backend", "timeout") == 180
+    assert get_default("selection", "auto_hide_ms") == 0
 
 
 def test_load_config_ignores_stored_glossary():

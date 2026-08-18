@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..config import APP_VERSION, save_config
+from ..config import APP_VERSION, get_default, save_config
 from ..core.prompts import TARGET_LANGS
 from .glossary_dialog import GlossaryDialog
 from .ocr_translator import OCRTranslator
@@ -62,13 +62,15 @@ class MainWindow(QMainWindow):
         self._apply_selection_config()
 
         # 启动划词翻译（如果已启用），热键注册结果由 _on_hotkey_status 统一通知
-        if self._config.get("selection", {}).get("enabled", False):
+        if self._config.get("selection", {}).get(
+            "enabled", get_default("selection", "enabled")
+        ):
             self._selection_translator.start()
         else:
             self._notify("Tram 划词", "点击托盘图标开启划词翻译")
 
         # 启动 OCR 识图翻译（如果已启用）
-        if self._config.get("ocr", {}).get("enabled", False):
+        if self._config.get("ocr", {}).get("enabled", get_default("ocr", "enabled")):
             self._ocr_translator.start()
 
         # 启动后隐藏主窗口，仅托盘运行
@@ -217,7 +219,7 @@ class MainWindow(QMainWindow):
         self._lang_group = QActionGroup(self)
         self._lang_group.setExclusive(True)
         current_lang = self._config.get("translation", {}).get(
-            "target_lang", "中文（简体）"
+            "target_lang", get_default("translation", "target_lang")
         )
         for lang in TARGET_LANGS:
             act = self._lang_group.addAction(lang)
@@ -283,7 +285,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_selection(self) -> None:
         enabled = self._selection_action.isChecked()
-        self._config["selection"]["enabled"] = enabled
+        self._config.setdefault("selection", {})["enabled"] = enabled
         save_config(self._config)
         if enabled:
             self._selection_translator.start()
@@ -321,10 +323,12 @@ class MainWindow(QMainWindow):
         self._lang_test_lang = lang
         b = self._config.get("backend", {})
         w = TestConnectionWorker(
-            b.get("base_url", ""),
-            b.get("api_key", "ollama"),
-            b.get("model", ""),
-            use_system_role=bool(b.get("use_system_role", True)),
+            b.get("base_url", get_default("backend", "base_url")),
+            b.get("api_key", get_default("backend", "api_key")),
+            b.get("model", get_default("backend", "model")),
+            use_system_role=bool(
+                b.get("use_system_role", get_default("backend", "use_system_role"))
+            ),
             parent=self,
         )
         self._lang_test_worker = w
@@ -369,10 +373,12 @@ class MainWindow(QMainWindow):
         """
         sel = self._config.get("selection", {})
         ocr = self._config.get("ocr", {})
-        self._selection_action.setChecked(sel.get("enabled", False))
-        self._ocr_action.setChecked(ocr.get("enabled", False))
-        sel_on = "开" if sel.get("enabled", False) else "关"
-        ocr_on = "开" if ocr.get("enabled", False) else "关"
+        sel_enabled = sel.get("enabled", get_default("selection", "enabled"))
+        ocr_enabled = ocr.get("enabled", get_default("ocr", "enabled"))
+        self._selection_action.setChecked(sel_enabled)
+        self._ocr_action.setChecked(ocr_enabled)
+        sel_on = "开" if sel_enabled else "关"
+        ocr_on = "开" if ocr_enabled else "关"
         self._tray_icon.setToolTip(f"Tram - 划词: {sel_on} | OCR: {ocr_on}")
 
     def _on_hotkey_status(
@@ -412,7 +418,7 @@ class MainWindow(QMainWindow):
     def _sync_target_lang_action(self) -> None:
         """设置保存后同步托盘菜单的目标语言选中状态。"""
         current = self._config.get("translation", {}).get(
-            "target_lang", "中文（简体）"
+            "target_lang", get_default("translation", "target_lang")
         )
         for action in self._lang_group.actions():
             action.setChecked(action.text() == current)
@@ -438,11 +444,13 @@ class MainWindow(QMainWindow):
     # ---------- 退出 ----------
     def quit_app(self) -> None:
         self._quitting = True
-        # 等待进行中的连接测试退出，避免 QThread 析构时仍在运行
+        # 先取消再等待进行中的连接测试：测试请求超时长达 30s，
+        # 不取消的话 2s 等待必然超时，退出时会销毁运行中的 QThread
         w = self._lang_test_worker
         self._lang_test_worker = None
         if w is not None:
             try:
+                w.request_stop()
                 if w.isRunning():
                     w.wait(2000)
             except RuntimeError:

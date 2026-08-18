@@ -21,8 +21,10 @@ try:
     from importlib.metadata import version as _pkg_version
 
     APP_VERSION = _pkg_version("tram")
-except Exception:  # 打包后元数据缺失时回退
-    APP_VERSION = "0.3.0"
+except Exception:  # 打包后元数据缺失时回退到包内常量
+    from . import __version__
+
+    APP_VERSION = __version__
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,16 @@ DEFAULT_CONFIG.pop("glossary", None)
 # glossary 单独保存在 glossary.json，启动时由 main 注入 config；
 # 若随 config 落盘会产生两份数据源，且磁盘上的副本很快过期。
 _RUNTIME_ONLY_KEYS = frozenset({"glossary"})
+
+
+def get_default(section: str, key: str):
+    """读取某个配置项的默认值。
+
+    dataclass 字段默认是唯一事实来源：消费者代码禁止再手写字面量
+    默认值（如 "Ctrl+F4"、2000），改用 get_default("selection", "hotkey")，
+    避免默认值散落多处后改一处漏一处。
+    """
+    return DEFAULT_CONFIG[section][key]
 
 # 已知数值/布尔字段的类型强制转换表，防止手动编辑 config.json
 # 时写入错误类型导致后续运行时崩溃
@@ -193,7 +205,13 @@ def load_config() -> dict:
                     if isinstance(values, dict):
                         cfg.setdefault(section, {}).update(values)
                     else:
-                        cfg[section] = values
+                        # 非 dict 的节（如手动把 "backend" 改成了字符串）
+                        # 直接忽略并保留默认值，否则后续 .get().get() 链
+                        # 会以 AttributeError 崩溃
+                        logger.warning(
+                            "配置节 %s 非 dict（%s），忽略并使用默认值",
+                            section, type(values).__name__,
+                        )
     except (json.JSONDecodeError, OSError):
         pass  # 配置损坏时静默回退到默认
     return _coerce_types(cfg)

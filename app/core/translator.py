@@ -1,7 +1,7 @@
 """翻译编排。
 
 流程：分段 -> 逐块构造带上下文/术语表的提示词 -> 流式调用后端。
-支持 on_token（增量文本）与 on_chunk 回调，供 GUI 流式显示。
+支持 on_token 增量回调，供 GUI 流式显示。
 单块翻译失败自动重试，但对永久性错误（4xx）立即失败。
 """
 
@@ -11,7 +11,8 @@ import logging
 import time
 from collections.abc import Callable
 
-from .backend import BackendError, OpenAIBackend
+from ..config import get_default
+from .backend import BackendError, OpenAIBackend, StreamCancelled
 from .chunking import split_text
 from .glossary import to_prompt_block
 from .prompts import build_messages
@@ -33,44 +34,68 @@ def _is_retryable(err: Exception) -> bool:
     return True
 
 
+def _backoff_sleep(backend: object, seconds: float) -> bool:
+    """退避等待，返回期间是否被取消。
+
+    OpenAIBackend 提供 interruptible_sleep（Event.wait，cancel 立即唤醒）；
+    测试替身等鸭子类型对象回退到 time.sleep，取消与否交给调用方的
+    should_stop 检查兜底。
+    """
+    sleeper = getattr(backend, "interruptible_sleep", None)
+    if callable(sleeper):
+        return bool(sleeper(seconds))
+    time.sleep(seconds)
+    return False
+
+
 class Translator:
-    def __init__(self, backend: OpenAIBackend, config: dict):
+    def __init__(
+        self,
+        backend: OpenAIBackend,
+        config: dict,
+        should_stop: Callable[[], bool] | None = None,
+    ):
         self.backend = backend
         self.config = config
+        # 外部停止检查（如 TranslateWorker 的 _stop_flag）：
+        # 覆盖 cancel() 只能中断"正在进行的请求"、无法中断"退避 sleep /
+        # 下一块尚未开始"的窗口期，防止已取消的任务重新发起请求。
+        self._should_stop = should_stop
+
+    def _stopped(self) -> bool:
+        return self._should_stop is not None and self._should_stop()
 
     def translate(
         self,
         text: str,
         on_token: Callable[[str], None] | None = None,
-        on_chunk: Callable[[int, int], None] | None = None,
         on_retry: Callable[[], None] | None = None,
     ) -> str:
         """翻译整段文本，返回完整译文。
 
         on_token: 每个增量 token 回调（含换行）。
-        on_chunk: 每个块开始/结束回调 (index, total)，可用于进度显示。
         on_retry: 单块翻译重试前回调，用于通知 UI 回滚该块已显示的内容。
         """
         tcfg = self.config.get("translation", {})
-        source_lang = tcfg.get("source_lang", "自动识别")
-        target_lang = tcfg.get("target_lang", "中文（简体）")
-        style = tcfg.get("style", "忠实原文")
-        chunk_chars = tcfg.get("chunk_chars", 2000)
+        source_lang = tcfg.get("source_lang", get_default("translation", "source_lang"))
+        target_lang = tcfg.get("target_lang", get_default("translation", "target_lang"))
+        style = tcfg.get("style", get_default("translation", "style"))
+        chunk_chars = tcfg.get("chunk_chars", get_default("translation", "chunk_chars"))
         # 不支持 system 角色的后端：系统提示词并入 user 消息
         use_system_role = self.config.get("backend", {}).get(
-            "use_system_role", True
+            "use_system_role", get_default("backend", "use_system_role")
         )
 
         glossary_block = to_prompt_block(self.config.get("glossary", []))
         chunks = split_text(text, chunk_chars)
-        total = len(chunks)
 
         full_result: list[str] = []
         prev_result: str | None = None  # 前一块译文，用于保持术语/风格一致
 
-        for index, chunk in enumerate(chunks):
-            if on_chunk:
-                on_chunk(index, total)
+        for chunk in chunks:
+            # 每块开始前检查取消：多块翻译被取消时不再发起后续块请求
+            if self._stopped():
+                raise StreamCancelled()
 
             context_block = ""
             if prev_result:
@@ -112,8 +137,8 @@ class Translator:
         直接穿透到调用方——确保取消时不触发重试、不继续后续块。
         """
         bcfg = self.config.get("backend", {})
-        temperature = bcfg.get("temperature", 0.2)
-        max_tokens = bcfg.get("max_tokens", 2048)
+        temperature = bcfg.get("temperature", get_default("backend", "temperature"))
+        max_tokens = bcfg.get("max_tokens", get_default("backend", "max_tokens"))
 
         last_err: Exception | None = None
         collected: list[str] = []
@@ -124,13 +149,20 @@ class Translator:
                 on_token(t)
 
         for attempt in range(_MAX_RETRIES):
+            # 重试前检查取消：cancel() 无法中断退避 sleep，若不拦截，
+            # 已取消的任务会在 sleep 结束后重新发起完整请求
+            if self._stopped():
+                raise StreamCancelled()
             if attempt > 0:
                 if on_retry:
                     on_retry()
                 collected.clear()
                 delay = _RETRY_BASE_DELAY * attempt  # 退避：1.5s / 3.0s
                 logger.info("翻译重试 #%d，等待 %.1fs", attempt, delay)
-                time.sleep(delay)
+                if _backoff_sleep(self.backend, delay):
+                    raise StreamCancelled()  # 等待期间被 cancel 打断
+                if self._stopped():
+                    raise StreamCancelled()
             try:
                 self.backend.chat_stream(
                     messages,

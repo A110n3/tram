@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 POPUP_WIDTH = 380
+# 取不到屏幕信息时的最大高度兜底（正常取所在屏幕可用高度的 1/4）
 POPUP_MAX_HEIGHT = 360
 POPUP_MARGIN = 12
 # 高度计算时为滚动预留的宽度，保证滚动条出现时文本宽度不变、不重排
@@ -29,6 +30,9 @@ _SCROLLBAR_RESERVE = 10
 _CHROME_HEIGHT = 48
 # 最小窗口高度，避免空内容时坍缩
 _MIN_HEIGHT = 60
+# 最大高度下限：超小屏幕上 1/4 屏高可能只剩百来像素，
+# 兜住避免窗口退化成一条缝（仍远低于任何正常屏幕的 1/4）
+_MIN_MAX_HEIGHT = 180
 # 等待首个 token 超过此时长后，提示"后端可能在加载模型"
 _SLOW_HINT_MS = 8000
 
@@ -65,9 +69,11 @@ class TranslationPopup(QFrame):
 
     def _build_ui(self) -> None:
         self.setFixedWidth(POPUP_WIDTH)
-        # 高度完全由 _adjust_height 通过 setFixedHeight 控制，
-        # 不在构造时预设 setMaximumHeight / controversial size policy，
-        # 避免与 setFixedHeight 产生 MINMAXINFO 约束冲突。
+        # 高度完全由 _adjust_height 通过 setFixedHeight 控制：
+        # 内容少时随文本增长，到达屏幕 1/4 高度上限后由
+        # QScrollArea 滚动显示溢出内容（见 _adjust_height）。
+        # 不在构造时预设 setMaximumHeight，避免与 setFixedHeight
+        # 产生 MINMAXINFO 约束冲突。
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         # 标题栏：拖动提示 + 关闭按钮，右对齐
@@ -256,6 +262,22 @@ class TranslationPopup(QFrame):
         else:
             self._timer.stop()
 
+    def _max_window_height(self) -> int:
+        """最大窗口高度：浮窗所在屏幕可用高度的 1/4。
+
+        已显示时以窗口所在屏幕为准（流式输出中途换屏/拖动后仍准确）；
+        未显示时按光标所在屏幕预估（与 _position_at_cursor 同一块屏）。
+        """
+        screen = self.screen() if self.isVisible() else None
+        if screen is None:
+            screen = (
+                QGuiApplication.screenAt(QCursor.pos())
+                or QGuiApplication.primaryScreen()
+            )
+        if screen is None:  # 极端情况（无屏幕），用固定兜底
+            return POPUP_MAX_HEIGHT
+        return max(screen.availableGeometry().height() // 4, _MIN_MAX_HEIGHT)
+
     def _adjust_height(self) -> None:
         # 可用宽度扣除滚动条预留，保证滚动条出现前后文本不重排
         avail_w = POPUP_WIDTH - 2 * POPUP_MARGIN - _SCROLLBAR_RESERVE
@@ -265,9 +287,9 @@ class TranslationPopup(QFrame):
 
         # Chrome: top margin(10) + bottom margin(12) + spacing(6)
         # + header(close btn 20)
-        chrome = _CHROME_HEIGHT
-        total = tgt_h + chrome
-        self.setFixedHeight(min(max(total, _MIN_HEIGHT), POPUP_MAX_HEIGHT))
+        total = tgt_h + _CHROME_HEIGHT
+        # 上限内随内容增长；触顶后 QScrollArea 出现滚动条展示溢出
+        self.setFixedHeight(min(max(total, _MIN_HEIGHT), self._max_window_height()))
 
     def _scroll_to_top(self) -> None:
         self._vbar.setValue(0)

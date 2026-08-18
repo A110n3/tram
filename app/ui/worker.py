@@ -110,6 +110,9 @@ class TestConnectionWorker(QThread):
     设置对话框的「测试连接」按钮与托盘菜单切换目标语言共用。
     自持 backend 引用（而非调用 test_connection）以支持取消：
     退出/重开对话框时可立即中断 30s 超时内的阻塞请求。
+
+    timeout 可覆盖（默认 30s）：启动预热复用本 worker 等待本地
+    后端加载模型（Lemonade/Ollama 冷启动可达数分钟，30s 必超时）。
     """
 
     ok = pyqtSignal(str)
@@ -121,6 +124,7 @@ class TestConnectionWorker(QThread):
         api_key: str,
         model: str,
         use_system_role: bool = True,
+        timeout: int = 30,
         parent=None,
     ):
         super().__init__(parent)
@@ -128,6 +132,7 @@ class TestConnectionWorker(QThread):
         self._api_key = api_key
         self._model = model
         self._use_system_role = use_system_role
+        self._timeout = timeout
         self._stopped = False
         self._backend: OpenAIBackend | None = None
 
@@ -142,7 +147,9 @@ class TestConnectionWorker(QThread):
                 logger.debug("测试连接 backend.cancel 异常", exc_info=True)
 
     def run(self) -> None:
-        backend = OpenAIBackend(self._base_url, self._api_key, self._model, timeout=30)
+        backend = OpenAIBackend(
+            self._base_url, self._api_key, self._model, timeout=self._timeout
+        )
         self._backend = backend
         try:
             reply = backend.chat(

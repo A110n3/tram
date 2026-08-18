@@ -170,7 +170,19 @@ class Translator:
                     max_tokens=max_tokens,
                     on_token=_on_token,
                 )
-                return "".join(collected).strip()
+                result = "".join(collected).strip()
+                if result:
+                    return result
+                # 流正常结束但无内容：思考型模型（reasoning_content）
+                # 可能把 max_tokens 耗尽在思考阶段，content 为空。
+                # 视为瞬态错误走重试，重试仍为空则最终报错，
+                # 避免浮窗被静默清空、无任何提示。
+                last_err = BackendError(
+                    "模型返回空结果（思考过程可能耗尽 max_tokens，"
+                    "可在设置中调大 max_tokens）"
+                )
+                logger.warning("翻译返回空结果 (attempt %d/%d)",
+                               attempt + 1, _MAX_RETRIES)
             except BackendError as e:
                 last_err = e
                 if not _is_retryable(e):

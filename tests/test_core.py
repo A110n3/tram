@@ -212,6 +212,51 @@ def test_translate_chunk_clears_partial_tokens_on_retry():
     assert "".join(emitted) == "正确译文"
 
 
+def test_translate_chunk_empty_result_retries_then_succeeds():
+    """空结果视为瞬态错误重试：思考型模型耗尽 max_tokens 时 content 为空。"""
+
+    class _EmptyThenOkBackend:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_stream(self, messages, temperature=0.2, max_tokens=2048, on_token=None):
+            self.calls += 1
+            if self.calls == 1:
+                return  # 流正常结束但没有任何 token
+            if on_token:
+                on_token("译文")
+
+        def interruptible_sleep(self, seconds: float) -> bool:
+            return False
+
+    backend = _EmptyThenOkBackend()
+    translator = Translator(backend, {"backend": {}})
+    result = translator._translate_chunk([{"role": "user", "content": "hi"}])
+    assert result == "译文"
+    assert backend.calls == 2
+
+
+def test_translate_chunk_empty_result_fails_after_retries():
+    """恒为空时耗尽重试后报错，不得静默返回空字符串清空浮窗。"""
+    import pytest
+
+    class _AlwaysEmptyBackend:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_stream(self, messages, temperature=0.2, max_tokens=2048, on_token=None):
+            self.calls += 1  # 正常结束但无 token
+
+        def interruptible_sleep(self, seconds: float) -> bool:
+            return False
+
+    backend = _AlwaysEmptyBackend()
+    translator = Translator(backend, {"backend": {}})
+    with pytest.raises(BackendError, match="空结果"):
+        translator._translate_chunk([{"role": "user", "content": "hi"}])
+    assert backend.calls == 3
+
+
 def test_parse_hotkey_ctrl_shift_t():
     from app.core.hotkey import MOD_CONTROL, MOD_SHIFT, parse_hotkey
     mods, vk = parse_hotkey("Ctrl+Shift+T")

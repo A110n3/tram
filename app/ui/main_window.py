@@ -57,6 +57,9 @@ class MainWindow(QMainWindow):
         self._lang_test_worker: TestConnectionWorker | None = None
         self._lang_test_lang: str = ""
 
+        # 模型预热线程（启动/切换模型后触发，见 _start_warmup）
+        self._warmup_worker: TestConnectionWorker | None = None
+
         # 各服务最新状态：合并进唯一一条托盘通知展示（见 _show_aggregated_status）
         self._statuses: dict[str, tuple[bool, str]] = {}
 
@@ -75,6 +78,9 @@ class MainWindow(QMainWindow):
         # 启动 OCR 识图翻译（如果已启用）
         if self._config.get("ocr", {}).get("enabled", get_default("ocr", "enabled")):
             self._ocr_translator.start()
+
+        # 后台预热模型：把"等待模型加载"从用户首次翻译挪到启动阶段
+        self._start_warmup()
 
         # 启动后隐藏主窗口，仅托盘运行
         self.hide()
@@ -392,6 +398,48 @@ class MainWindow(QMainWindow):
             icon=QSystemTrayIcon.MessageIcon.Warning,
         )
 
+    # ---------- 模型预热 ----------
+    def _start_warmup(self) -> None:
+        """后台预热本地模型：发送最小请求触发后端加载模型。
+
+        Lemonade/Ollama 等本地服务在模型未加载时，首个请求会阻塞到
+        加载完成（实测数十秒，NPU 首次冷编译可达数分钟），期间浮窗
+        一直显示"可能在加载模型"，用户以为卡死只能重试。启动与
+        切换模型后主动预热，用户首次翻译时模型已热。
+
+        结果静默：成功不打扰用户；失败留给真实翻译按正常管线报错
+        （预热请求与翻译请求无状态关联，失败不影响后者）。
+        """
+        self._drop_warmup_worker()
+        b = self._config.get("backend", {})
+        w = TestConnectionWorker(
+            b.get("base_url", get_default("backend", "base_url")),
+            b.get("api_key", get_default("backend", "api_key")),
+            b.get("model", get_default("backend", "model")),
+            use_system_role=bool(
+                b.get("use_system_role", get_default("backend", "use_system_role"))
+            ),
+            # 用配置的完整超时等待模型加载完成（默认 30s 必然不够）
+            timeout=int(b.get("timeout", get_default("backend", "timeout"))),
+            parent=self,
+        )
+        self._warmup_worker = w
+        track_worker(self, "_warmup_worker", w)
+        w.start()
+
+    def _drop_warmup_worker(self) -> None:
+        """作废进行中的预热：请求停止并中断阻塞的加载等待。"""
+        w = self._warmup_worker
+        self._warmup_worker = None
+        if w is None:
+            return
+        try:
+            w.request_stop()
+            if w.isRunning():
+                w.wait(2000)
+        except RuntimeError:
+            pass  # 僵尸包装器（C++ 对象已删除），无需处理
+
     def _apply_selection_config(self) -> None:
         """同步托盘菜单勾选状态与 tooltip，不负责启停热键或弹通知。
 
@@ -432,6 +480,8 @@ class MainWindow(QMainWindow):
             # 重建后端（切换模型时生效），并重新注册热键
             self._selection_translator.rebuild_backend()
             self._ocr_translator.rebuild_backend()
+            # 模型可能已切换，重新预热
+            self._start_warmup()
             # 翻译参数可能已变化，允许立即用同一文本重新翻译验证效果
             self._selection_translator.invalidate_last_text()
             self._ocr_translator.invalidate_last_text()
@@ -470,6 +520,9 @@ class MainWindow(QMainWindow):
     # ---------- 退出 ----------
     def quit_app(self) -> None:
         self._quitting = True
+        # 先取消再等待进行中的预热线程：等待模型加载可长达配置超时
+        # （180s），不取消的话退出时会销毁运行中的 QThread
+        self._drop_warmup_worker()
         # 先取消再等待进行中的连接测试：测试请求超时长达 30s，
         # 不取消的话 2s 等待必然超时，退出时会销毁运行中的 QThread
         w = self._lang_test_worker

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import threading
@@ -164,10 +165,8 @@ class OpenAIBackend:
                 # 清除当前响应引用并关闭响应
                 with self._response_lock:
                     self._current_response = None
-                try:
+                with contextlib.suppress(Exception):
                     resp.close()
-                except Exception:
-                    pass
         except httpx.HTTPError as e:
             if self._cancel_event.is_set():
                 raise StreamCancelled() from e  # 取消导致的网络错误

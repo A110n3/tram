@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from PyQt6.QtCore import QThread
 
@@ -37,9 +38,13 @@ def forget_worker(owner: object, attr: str, w: object) -> None:
 def launch_worker(
     owner: object,
     attr: str,
-    worker: QThread,
+    # 实际类型为 _BackendRequestWorker（带 ok/err 信号）；PyQt 信号在
+    # stub 中是描述符，精确标注收益低，此处按 Any 处理
+    worker: Any,
     *,
-    on_ok: Callable[[object], None] | None = None,
+    # ok 信号携带 object；回调形参多为具体类型（str 等），
+    # 用 Any 避免 Callable 参数逆变导致的不兼容
+    on_ok: Callable[[Any], None] | None = None,
     on_err: Callable[[str], None] | None = None,
     on_finished: Callable[[], None] | None = None,
 ) -> None:
@@ -50,7 +55,7 @@ def launch_worker(
 
     owner: 持有 worker 的对象（self）
     attr: worker 属性名（如 "_lang_test_worker"）
-    worker: 要启动的 QThread 实例
+    worker: 要启动的 _BackendRequestWorker 实例
     on_ok: ok 信号回调（可选）
     on_err: err 信号回调（可选）
     on_finished: finished 信号回调（可选）

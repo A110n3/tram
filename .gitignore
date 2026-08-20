@@ -27,6 +27,7 @@ desktop.ini
 
 # 会话/临时记录
 conversation-*.txt
+2026-*-this-session-is-being-continued-*.txt
 
 # 工具缓存
 .pytest_cache/

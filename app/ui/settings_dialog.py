@@ -226,6 +226,65 @@ class SettingsDialog(QDialog):
         ol.addRow("", self._ocr_hotkey_validation)
 
         layout.addWidget(ocr_gb)
+
+        # 区域实时监控分组
+        mon_gb = QGroupBox("区域实时监控")
+        ml = QFormLayout(mon_gb)
+        ml.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.monitor_enabled_cb = QCheckBox("启用区域实时监控")
+        self.monitor_hotkey_edit = QKeySequenceEdit()
+        self.monitor_hotkey_edit.keySequenceChanged.connect(
+            self._validate_monitor_hotkey
+        )
+        self._monitor_hotkey_validation = QLabel("")
+        self._monitor_hotkey_validation.setStyleSheet("color: #888; font-size: 11px;")
+
+        self.monitor_interval_spin = QDoubleSpinBox()
+        self.monitor_interval_spin.setRange(0.2, 5.0)
+        self.monitor_interval_spin.setSingleStep(0.1)
+        self.monitor_interval_spin.setDecimals(1)
+        self.monitor_interval_spin.setSuffix(" s")
+        self.monitor_interval_spin.setToolTip(
+            "每隔多久检查一次区域画面。越小越实时，OCR 占用越高。"
+        )
+
+        self.monitor_diff_spin = QDoubleSpinBox()
+        self.monitor_diff_spin.setRange(0.5, 50.0)
+        self.monitor_diff_spin.setSingleStep(0.5)
+        self.monitor_diff_spin.setDecimals(1)
+        self.monitor_diff_spin.setSuffix(" %")
+        self.monitor_diff_spin.setToolTip(
+            "画面变化像素占比超过此值才执行 OCR 识别。调大可过滤噪点/轻微动画，"
+            "调小更灵敏。静态背景（游戏对话框等）下大部分周期在此挡掉。"
+        )
+
+        self.monitor_sim_spin = QDoubleSpinBox()
+        self.monitor_sim_spin.setRange(50.0, 100.0)
+        self.monitor_sim_spin.setSingleStep(1.0)
+        self.monitor_sim_spin.setDecimals(0)
+        self.monitor_sim_spin.setSuffix(" %")
+        self.monitor_sim_spin.setToolTip(
+            "新旧文本相似度达到此值视为重复字幕，不重复翻译。"
+            "调高减少漏翻，调低减少重复。"
+        )
+
+        self.monitor_history_spin = QSpinBox()
+        self.monitor_history_spin.setRange(1, 20)
+        self.monitor_history_spin.setSuffix(" 条")
+        self.monitor_history_spin.setToolTip(
+            "监控小窗保留最近 N 条翻译历史，同时用于字幕来回闪（A→B→A）的查重。"
+        )
+
+        ml.addRow("", self.monitor_enabled_cb)
+        ml.addRow("全局热键", self.monitor_hotkey_edit)
+        ml.addRow("", self._monitor_hotkey_validation)
+        ml.addRow("监控间隔", self.monitor_interval_spin)
+        ml.addRow("帧差阈值", self.monitor_diff_spin)
+        ml.addRow("文本相似度阈值", self.monitor_sim_spin)
+        ml.addRow("历史条数", self.monitor_history_spin)
+
+        layout.addWidget(mon_gb)
         layout.addStretch()
 
         return widget
@@ -293,6 +352,38 @@ class SettingsDialog(QDialog):
         )
         self._validate_ocr_hotkey(None)
 
+        mon = self._config.get("monitor", {})
+        self.monitor_enabled_cb.setChecked(
+            mon.get("enabled", get_default("monitor", "enabled"))
+        )
+        self.monitor_hotkey_edit.setKeySequence(
+            QKeySequence.fromString(
+                mon.get("hotkey", get_default("monitor", "hotkey")),
+                QKeySequence.SequenceFormat.PortableText,
+            )
+        )
+        self.monitor_interval_spin.setValue(
+            float(mon.get("interval_ms", get_default("monitor", "interval_ms")))
+            / 1000.0
+        )
+        self.monitor_diff_spin.setValue(
+            float(mon.get("diff_threshold", get_default("monitor", "diff_threshold")))
+            * 100.0
+        )
+        self.monitor_sim_spin.setValue(
+            float(
+                mon.get(
+                    "similarity_threshold",
+                    get_default("monitor", "similarity_threshold"),
+                )
+            )
+            * 100.0
+        )
+        self.monitor_history_spin.setValue(
+            int(mon.get("history_size", get_default("monitor", "history_size")))
+        )
+        self._validate_monitor_hotkey(None)
+
     def _on_preset(self) -> None:
         url = self.preset_combo.currentData()
         if url:
@@ -303,14 +394,30 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "提示", "请填写模型名称。")
             return
 
-        hotkey_spec = self._hotkey_spec(self.selection_hotkey_edit)
-        ocr_hotkey_spec = self._hotkey_spec(self.ocr_hotkey_edit)
+        # (配置节名, 热键串, 输入框, 校验标签)：三处热键统一走同一校验流程
+        hotkeys = (
+            (
+                "selection",
+                self._hotkey_spec(self.selection_hotkey_edit),
+                self.selection_hotkey_edit,
+                self._hotkey_validation,
+            ),
+            (
+                "ocr",
+                self._hotkey_spec(self.ocr_hotkey_edit),
+                self.ocr_hotkey_edit,
+                self._ocr_hotkey_validation,
+            ),
+            (
+                "monitor",
+                self._hotkey_spec(self.monitor_hotkey_edit),
+                self.monitor_hotkey_edit,
+                self._monitor_hotkey_validation,
+            ),
+        )
 
         # 格式校验 + 空值拦截（清空热键框不是合法输入，不再静默回退默认）
-        for spec, edit, label in (
-            (hotkey_spec, self.selection_hotkey_edit, self._hotkey_validation),
-            (ocr_hotkey_spec, self.ocr_hotkey_edit, self._ocr_hotkey_validation),
-        ):
+        for _section, spec, edit, label in hotkeys:
             if not spec:
                 self._reject_hotkey(label, "请输入全局热键", edit)
                 return
@@ -320,28 +427,30 @@ class SettingsDialog(QDialog):
                 self._reject_hotkey(label, str(e), edit)
                 return
 
-        # 重复检测按解析结果比较："Ctrl+F4" 与 "Control+F4" 等价写法
-        # 字符串比较会漏拦，运行时第二个注册才失败
-        if parse_hotkey(hotkey_spec) == parse_hotkey(ocr_hotkey_spec):
-            self._reject_hotkey(
-                self._ocr_hotkey_validation,
-                "与划词热键重复，请更换组合键",
-                self.ocr_hotkey_edit,
-            )
-            return
+        # 重复检测按解析结果两两比较："Ctrl+F4" 与 "Control+F4" 等价
+        # 写法字符串比较会漏拦，运行时第二个注册才失败
+        names_cn = {"selection": "划词", "ocr": "OCR", "monitor": "监控"}
+        for i, (_section, spec, edit, label) in enumerate(hotkeys):
+            for prev_section, prev_spec, _e, _l in hotkeys[:i]:
+                if parse_hotkey(spec) == parse_hotkey(prev_spec):
+                    self._reject_hotkey(
+                        label,
+                        f"与{names_cn[prev_section]}热键重复，请更换组合键",
+                        edit,
+                    )
+                    return
 
         # 可注册性校验：与当前已生效配置等价则跳过
         # （自身热键线程正在注册同一组合，试注册必然冲突，是误报）
-        if self._hotkey_changed(hotkey_spec, "selection"):
-            ok, err = test_hotkey_available(hotkey_spec)
-            if not ok:
-                self._reject_hotkey(self._hotkey_validation, err, self.selection_hotkey_edit)
-                return
-        if self._hotkey_changed(ocr_hotkey_spec, "ocr"):
-            ok, err = test_hotkey_available(ocr_hotkey_spec)
-            if not ok:
-                self._reject_hotkey(self._ocr_hotkey_validation, err, self.ocr_hotkey_edit)
-                return
+        for section, spec, edit, label in hotkeys:
+            if self._hotkey_changed(spec, section):
+                ok, err = test_hotkey_available(spec)
+                if not ok:
+                    self._reject_hotkey(label, err, edit)
+                    return
+        hotkey_spec = hotkeys[0][1]
+        ocr_hotkey_spec = hotkeys[1][1]
+        monitor_hotkey_spec = hotkeys[2][1]
 
         self._config.setdefault("backend", {}).update(
             base_url=self.base_url_edit.text().strip(),
@@ -376,6 +485,17 @@ class SettingsDialog(QDialog):
             hotkey=ocr_hotkey_spec,
             languages=ocr.get("languages", get_default("ocr", "languages")),
             min_chars=ocr.get("min_chars", get_default("ocr", "min_chars")),
+        )
+        # min_chars 同为预留字段，保留原值
+        mon = self._config.setdefault("monitor", {})
+        mon.update(
+            enabled=self.monitor_enabled_cb.isChecked(),
+            hotkey=monitor_hotkey_spec,
+            interval_ms=round(self.monitor_interval_spin.value() * 1000),
+            diff_threshold=self.monitor_diff_spin.value() / 100.0,
+            similarity_threshold=self.monitor_sim_spin.value() / 100.0,
+            history_size=self.monitor_history_spin.value(),
+            min_chars=mon.get("min_chars", get_default("monitor", "min_chars")),
         )
         self.accept()
 
@@ -429,6 +549,11 @@ class SettingsDialog(QDialog):
     def _validate_ocr_hotkey(self, _seq: QKeySequence | None) -> None:
         self._validate_hotkey_field(
             self.ocr_hotkey_edit, self._ocr_hotkey_validation, "Ctrl+Shift+F4"
+        )
+
+    def _validate_monitor_hotkey(self, _seq: QKeySequence | None) -> None:
+        self._validate_hotkey_field(
+            self.monitor_hotkey_edit, self._monitor_hotkey_validation, "Ctrl+Alt+F4"
         )
 
     def _on_test(self) -> None:

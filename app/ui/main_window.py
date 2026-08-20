@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 from ..config import APP_VERSION, get_default, save_config
 from ..core.prompts import TARGET_LANGS
 from .glossary_dialog import GlossaryDialog
+from .monitor_translator import MonitorTranslator
 from .ocr_translator import OCRTranslator
 from .selection_translator import SelectionTranslator
 from .settings_dialog import SettingsDialog
@@ -52,6 +53,12 @@ class MainWindow(QMainWindow):
             lambda ok, msg: self._on_hotkey_status(ok, msg, "OCR")
         )
 
+        # 区域实时监控翻译服务
+        self._monitor_translator = MonitorTranslator(self._config)
+        self._monitor_translator.hotkey_status.connect(
+            lambda ok, msg: self._on_hotkey_status(ok, msg, "监控")
+        )
+
         # 切换目标语言后的连接测试线程
         self._lang_test_worker: TestConnectionWorker | None = None
         self._lang_test_lang: str = ""
@@ -77,6 +84,12 @@ class MainWindow(QMainWindow):
         # 启动 OCR 识图翻译（如果已启用）
         if self._config.get("ocr", {}).get("enabled", get_default("ocr", "enabled")):
             self._ocr_translator.start()
+
+        # 启动区域实时监控（如果已启用）
+        if self._config.get("monitor", {}).get(
+            "enabled", get_default("monitor", "enabled")
+        ):
+            self._monitor_translator.start()
 
         # 后台预热模型：把"等待模型加载"从用户首次翻译挪到启动阶段
         self._start_warmup()
@@ -149,6 +162,7 @@ class MainWindow(QMainWindow):
         features = [
             "全局热键取词 — 选中文本按热键即译",
             "OCR 识图翻译 — 框选屏幕区域，识别图文即译",
+            "区域实时监控 — 框选字幕区，新字幕自动识别翻译",
             "流式悬浮窗 — 译文边生成边显示",
             "系统托盘常驻 — 后台静默运行",
             "多后端切换 — Ollama / LM Studio / vLLM",
@@ -221,6 +235,8 @@ class MainWindow(QMainWindow):
         self._selection_action.setCheckable(True)
         self._ocr_action = self._act(menu.addAction("OCR 识图翻译"), self._toggle_ocr)
         self._ocr_action.setCheckable(True)
+        self._monitor_action = self._act(menu.addAction("区域实时监控"), self._toggle_monitor)
+        self._monitor_action.setCheckable(True)
 
         # 目标语言快捷子菜单
         lang_menu = menu.addMenu("目标语言")
@@ -332,6 +348,19 @@ class MainWindow(QMainWindow):
             self._show_aggregated_status()
         self._apply_selection_config()
 
+    def _toggle_monitor(self) -> None:
+        enabled = self._monitor_action.isChecked()
+        self._config.setdefault("monitor", {})["enabled"] = enabled
+        save_config(self._config)
+        if enabled:
+            self._monitor_translator.start()
+        else:
+            # 服务关闭同时结束进行中的监控会话
+            self._monitor_translator.stop()
+            self._statuses["监控"] = (True, "已关闭")
+            self._show_aggregated_status()
+        self._apply_selection_config()
+
     def _on_target_lang_changed(self, action: QAction) -> None:
         """托盘菜单快捷切换目标语言。
 
@@ -344,6 +373,7 @@ class MainWindow(QMainWindow):
         # 目标语言变化后，允许立即用同一文本重新翻译验证效果
         self._selection_translator.invalidate_last_text()
         self._ocr_translator.invalidate_last_text()
+        self._monitor_translator.invalidate_last_text()
         self._start_lang_test(lang)
 
     def _start_lang_test(self, lang: str) -> None:
@@ -421,13 +451,19 @@ class MainWindow(QMainWindow):
         """
         sel = self._config.get("selection", {})
         ocr = self._config.get("ocr", {})
+        mon = self._config.get("monitor", {})
         sel_enabled = sel.get("enabled", get_default("selection", "enabled"))
         ocr_enabled = ocr.get("enabled", get_default("ocr", "enabled"))
+        mon_enabled = mon.get("enabled", get_default("monitor", "enabled"))
         self._selection_action.setChecked(sel_enabled)
         self._ocr_action.setChecked(ocr_enabled)
+        self._monitor_action.setChecked(mon_enabled)
         sel_on = "开" if sel_enabled else "关"
         ocr_on = "开" if ocr_enabled else "关"
-        self._tray_icon.setToolTip(f"Tram - 划词: {sel_on} | OCR: {ocr_on}")
+        mon_on = "开" if mon_enabled else "关"
+        self._tray_icon.setToolTip(
+            f"Tram - 划词: {sel_on} | OCR: {ocr_on} | 监控: {mon_on}"
+        )
 
     def _on_hotkey_status(self, ok: bool, message: str, service: str) -> None:
         """热键注册结果/引导消息：记入该服务状态，合并展示。
@@ -453,11 +489,13 @@ class MainWindow(QMainWindow):
             # 重建后端（切换模型时生效），并重新注册热键
             self._selection_translator.rebuild_backend()
             self._ocr_translator.rebuild_backend()
+            self._monitor_translator.rebuild_backend()
             # 模型可能已切换，重新预热
             self._start_warmup()
             # 翻译参数可能已变化，允许立即用同一文本重新翻译验证效果
             self._selection_translator.invalidate_last_text()
             self._ocr_translator.invalidate_last_text()
+            self._monitor_translator.invalidate_last_text()
             # 同步托盘菜单勾选状态与 tooltip
             self._apply_selection_config()
             # 同步托盘目标语言单选
@@ -501,6 +539,7 @@ class MainWindow(QMainWindow):
         shutdown_worker(self, "_lang_test_worker", "语言测试", timeout_ms=2000)
         self._selection_translator.shutdown()
         self._ocr_translator.shutdown()
+        self._monitor_translator.shutdown()
         app = QApplication.instance()
         if app is not None:
             app.quit()

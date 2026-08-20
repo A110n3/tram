@@ -58,20 +58,21 @@ def test_is_rapidocr_available_false_onnxruntime_missing(monkeypatch):
 
 
 class _FakeResult:
-    def __init__(self, txts):
+    def __init__(self, txts, scores=None):
         self.txts = txts
+        self.scores = scores
 
 
 class _FakeEngine:
     """记录调用并返回预设结果。"""
 
     def __init__(self, result=None, exc=None):
-        self.calls: list[bytes] = []
+        self.calls: list = []
         self._result = result
         self._exc = exc
 
-    def __call__(self, png):
-        self.calls.append(png)
+    def __call__(self, img):
+        self.calls.append(img)
         if self._exc is not None:
             raise self._exc
         return self._result
@@ -90,44 +91,55 @@ def fake_engine(monkeypatch):
     return install
 
 
-def test_ocr_bytes_success(fake_engine):
+@pytest.fixture(scope="module")
+def tiny_png():
+    """真实极小 PNG：ocr_bytes 现在先 cv2 解码再推理，假字节无法通过。"""
+    import cv2
+    import numpy as np
+
+    ok, buf = cv2.imencode(".png", np.zeros((4, 4, 3), dtype=np.uint8))
+    assert ok
+    return buf.tobytes()
+
+
+def test_ocr_bytes_success(fake_engine, tiny_png):
     fake_engine(result=_FakeResult(["离线翻译 Tram", "Hello OCR"]))
-    assert ocr.ocr_bytes(b"png") == "离线翻译 Tram\nHello OCR"
+    assert ocr.ocr_bytes(tiny_png) == "离线翻译 Tram\nHello OCR"
 
 
-def test_ocr_bytes_cleans_result(fake_engine):
+def test_ocr_bytes_cleans_result(fake_engine, tiny_png):
     fake_engine(result=_FakeResult(["  带尾空格  ", "", ""]))
-    assert ocr.ocr_bytes(b"png") == "带尾空格"
+    assert ocr.ocr_bytes(tiny_png) == "带尾空格"
 
 
-def test_ocr_bytes_none_result_returns_empty(fake_engine):
+def test_ocr_bytes_none_result_returns_empty(fake_engine, tiny_png):
     engine = fake_engine(result=None)
-    assert ocr.ocr_bytes(b"png") == ""
+    assert ocr.ocr_bytes(tiny_png) == ""
     assert len(engine.calls) == 1
 
 
-def test_ocr_bytes_empty_txts_returns_empty(fake_engine):
+def test_ocr_bytes_empty_txts_returns_empty(fake_engine, tiny_png):
     fake_engine(result=_FakeResult([]))
-    assert ocr.ocr_bytes(b"png") == ""
+    assert ocr.ocr_bytes(tiny_png) == ""
 
 
-def test_ocr_bytes_engine_exception_wrapped(fake_engine):
+def test_ocr_bytes_engine_exception_wrapped(fake_engine, tiny_png):
     fake_engine(exc=RuntimeError("onnx session crashed"))
     with pytest.raises(ocr.OCRError, match="OCR 识别失败"):
-        ocr.ocr_bytes(b"png")
+        ocr.ocr_bytes(tiny_png)
 
 
 def test_ocr_bytes_engine_unavailable(monkeypatch):
     monkeypatch.setattr(ocr, "is_rapidocr_available", lambda: False)
     with pytest.raises(ocr.OCRError, match="未安装"):
-        ocr.ocr_bytes(b"png")
+        ocr.ocr_bytes(b"png")  # 校验先于解码：假字节也能验证错误优先级
 
 
 def test_ocr_bytes_unsupported_language(fake_engine):
     engine = fake_engine(result=_FakeResult(["x"]))
     with pytest.raises(ocr.OCRError, match="暂不支持"):
-        ocr.ocr_bytes(b"png", "jpn")
-    assert engine.calls == []  # 语言校验在引擎调用之前
+        ocr.ocr_bytes(b"png", "jpn")  # 校验先于解码与引擎调用
+    assert engine.calls == []
 
 
 # ------------------------------------------------------------------ #
@@ -136,9 +148,40 @@ def test_ocr_bytes_unsupported_language(fake_engine):
 
 
 @pytest.mark.parametrize("legacy", ["chi_sim+eng", "chi_tra+eng", "eng", "CH"])
-def test_ocr_bytes_accepts_legacy_languages(fake_engine, legacy):
+def test_ocr_bytes_accepts_legacy_languages(fake_engine, tiny_png, legacy):
     fake_engine(result=_FakeResult(["ok"]))
-    assert ocr.ocr_bytes(b"png", legacy) == "ok"
+    assert ocr.ocr_bytes(tiny_png, legacy) == "ok"
+
+
+# ------------------------------------------------------------------ #
+#  ndarray 路径（区域监控复用：png_to_ndarray / ocr_lines）
+# ------------------------------------------------------------------ #
+
+
+def test_png_to_ndarray_decodes(tiny_png):
+    img = ocr.png_to_ndarray(tiny_png)
+    assert img.shape == (4, 4, 3)  # BGR 三通道
+
+
+def test_png_to_ndarray_invalid_raises():
+    with pytest.raises(ocr.OCRError, match="解码失败"):
+        ocr.png_to_ndarray(b"png")
+
+
+def test_ocr_lines_returns_scores(fake_engine, tiny_png):
+    fake_engine(
+        result=_FakeResult(["你好", "world"], scores=[0.95, 0.72])
+    )
+    assert ocr.ocr_lines(ocr.png_to_ndarray(tiny_png)) == [
+        ("你好", 0.95),
+        ("world", 0.72),
+    ]
+
+
+def test_ocr_lines_missing_scores_fallback(fake_engine, tiny_png):
+    """引擎未返回 scores 时置信度回退 0.0（不应崩溃）。"""
+    fake_engine(result=_FakeResult(["abc"], scores=None))
+    assert ocr.ocr_lines(ocr.png_to_ndarray(tiny_png)) == [("abc", 0.0)]
 
 
 # ------------------------------------------------------------------ #

@@ -55,16 +55,20 @@ ignore = ["E402"]  # 模块级 import 在条件分支之后（Win32 场景常见
 
 # ---------- mypy ----------
 [tool.mypy]
-python_version = "3.10"
+# 3.12 而非 requires-python 的 3.10 下限：numpy 2.5 的 stub 使用
+# `type` 语句等 3.12+ 语法，且 follow_imports=skip 也无法阻止 mypy
+# 解析直接导入模块的 stub（语法错误直接 bail）。开发 venv 为 3.14，
+# 打包随 venv 走，取 3.12 兼顾 stub 可用性与贴近运行环境。
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
-ignore_missing_imports = true  # PyQt6/pywin32 无 stub
+ignore_missing_imports = true  # pywin32 等无 stub（PyQt6 6.9+ 已自带类型）
 check_untyped_defs = true
 
-# OCR 引擎栈：rapidocr 间接拖入 numpy，其 stub 使用 3.12+ 语法，
-# 与 mypy 3.10 目标不兼容；不跟随类型，一律按 Any 处理
+# OCR/监控图像栈不跟随类型检查：图像数组全程按 Any 传递，
+# 跳过可省去庞大 stub 图的语义检查耗时
 [[tool.mypy.overrides]]
-module = ["rapidocr.*"]
+module = ["rapidocr.*", "numpy", "numpy.*", "cv2", "cv2.*", "PIL", "PIL.*"]
 follow_imports = "skip"
 
 # ---------- pytest ----------

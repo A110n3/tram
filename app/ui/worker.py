@@ -13,6 +13,7 @@ cancel() 无法触及的窗口期。
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -21,7 +22,7 @@ from ..core.backend import (
     OpenAIBackend,
     build_test_messages,
 )
-from ..core.ocr import ocr_bytes
+from ..core.ocr import OCRError, ocr_bytes
 from ..core.translator import Translator
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,66 @@ class OCRWorker(QThread):
             self.failed.emit(str(e))
         else:
             self.succeeded.emit(text)
+
+
+class MonitorWorker(QThread):
+    """在 QThread 中执行区域监控循环：PIL 截图 + 漏斗状态机。
+
+    循环完全脱离 GUI 线程（PIL ImageGrab 可在后台线程调用），
+    周期 = max(interval, 单帧处理耗时)：OCR 慢于间隔时自动降频，
+    不排队积压。new_text 信号携带漏斗产出的新文本（未归一化），
+    由编排器做丢旧保新翻译。
+    """
+
+    new_text = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        bbox: tuple[int, int, int, int],
+        params: Any,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._bbox = bbox  # 主屏物理像素 (left, top, right, bottom)
+        self._params = params  # MonitorParams
+        self._stop_flag = False
+
+    def request_stop(self) -> None:
+        self._stop_flag = True
+
+    def run(self) -> None:
+        import time
+
+        import numpy as np
+        from PIL import ImageGrab
+
+        from ..core.monitor import RegionMonitorState
+        from ..core.ocr import ocr_lines
+
+        state = RegionMonitorState(params=self._params, ocr=ocr_lines)
+        interval = max(int(self._params.interval_ms), 100) / 1000.0
+        try:
+            while not self._stop_flag:
+                start = time.monotonic()
+                # ImageGrab 返回 RGB；转 BGR 以对齐 cv2/RapidOCR 约定
+                pil_img = ImageGrab.grab(bbox=self._bbox)
+                frame = np.asarray(pil_img)[:, :, ::-1]
+                text = state.process(frame)
+                if text and not self._stop_flag:
+                    self.new_text.emit(text)
+                # 睡满剩余周期；OCR 慢于间隔时不睡（自然降频）
+                remaining = interval - (time.monotonic() - start)
+                if remaining > 0:
+                    time.sleep(remaining)
+        except OCRError as e:
+            if not self._stop_flag:
+                logger.warning("监控 OCR 失败: %s", e, exc_info=True)
+                self.failed.emit(str(e))
+        except Exception as e:  # 截图失败（锁屏/权限）等
+            if not self._stop_flag:
+                logger.warning("监控循环异常: %s", e, exc_info=True)
+                self.failed.emit(f"监控异常: {e}")
 
 
 class _BackendRequestWorker(QThread):

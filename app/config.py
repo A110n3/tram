@@ -77,11 +77,23 @@ class OCRConfig:
 
 
 @dataclass
+class MonitorConfig:
+    enabled: bool = False  # 区域实时监控翻译模式开关（热键注册）
+    hotkey: str = "Ctrl+Alt+F4"  # 全局热键：开始/停止监控（首次触发框选区域）
+    interval_ms: int = 500  # 监控周期（毫秒）
+    diff_threshold: float = 0.02  # 帧差比例超过此值视为画面变化（0~1）
+    similarity_threshold: float = 0.88  # 文本相似度达到此值视为重复，不翻译
+    history_size: int = 5  # 监控小窗保留最近 N 条翻译历史
+    min_chars: int = 2  # 识别文本短于此值视为无文字
+
+
+@dataclass
 class TramConfig:
     backend: BackendConfig = field(default_factory=BackendConfig)
     translation: TranslationConfig = field(default_factory=TranslationConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     ocr: OCRConfig = field(default_factory=OCRConfig)
+    monitor: MonitorConfig = field(default_factory=MonitorConfig)
     glossary: list = field(default_factory=list)  # 运行时注入，不持久化
 
 
@@ -126,6 +138,14 @@ _TYPE_COERCIONS: dict[str, dict[str, type]] = {
     },
     "ocr": {
         "enabled": bool,
+        "min_chars": int,
+    },
+    "monitor": {
+        "enabled": bool,
+        "interval_ms": int,
+        "diff_threshold": float,
+        "similarity_threshold": float,
+        "history_size": int,
         "min_chars": int,
     },
 }

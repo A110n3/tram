@@ -112,15 +112,54 @@ def ocr_bytes(png: bytes, languages: str = "ch") -> str:
     推理有界（正常截图 < 2s）；popup「识别中…」已覆盖等待体验，
     极端情况 v2 再议。
     """
+    # 环境/语言校验先于解码：引擎未安装时根因是缺依赖，
+    # 不应被「字节流解码失败」之类的下游错误掩盖
+    _validate_env(languages)
+    lines = ocr_lines(png_to_ndarray(png), languages)
+    return clean_output("\n".join(t for t, _score in lines))
+
+
+def _validate_env(languages: str) -> None:
+    """引擎可用性与语言码校验，失败抛 OCRError（ocr_bytes/ocr_lines 共用）。"""
     if not is_rapidocr_available():
         raise OCRError('OCR 引擎未安装，请运行 pip install "tram[ocr]"')
     if languages.strip().lower() not in _SUPPORTED_LANGS:
         raise OCRError(f"OCR 语言暂不支持: {languages}（当前仅 ch 中英混排）")
+
+
+def png_to_ndarray(png: bytes) -> Any:
+    """PNG 字节流解码为 BGR ndarray（cv2.imdecode）。
+
+    供区域监控线程复用：监控循环在后台线程持 ndarray 做帧差比对，
+    避免与 QPixmap（仅主线程可用）耦合。cv2/numpy 是 rapidocr 的
+    必然依赖，此处不再探测可用性。
+    """
+    import cv2
+    import numpy as np
+
+    img = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise OCRError("PNG 字节流解码失败")
+    return img
+
+
+def ocr_lines(img: Any, languages: str = "ch") -> list[tuple[str, float]]:
+    """对 BGR ndarray 执行 OCR，返回 [(文本, 置信度), ...]。
+
+    区域监控使用：带置信度以便按行过滤低质量识别，抑制动态背景
+    下的误读。识别失败抛 OCRError；无文字返回空列表。
+    """
+    _validate_env(languages)
     engine = _get_engine()
     try:
-        result = engine(png)
+        result = engine(img)
     except Exception as e:
         raise OCRError(f"OCR 识别失败: {e}") from e
     if result is None or not result.txts:
-        return ""
-    return clean_output("\n".join(result.txts))
+        return []
+    txts = result.txts
+    scores = result.scores if result.scores is not None else ()
+    return [
+        (t, float(scores[i]) if i < len(scores) else 0.0)
+        for i, t in enumerate(txts)
+    ]

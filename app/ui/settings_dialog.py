@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 
 from PyQt6.QtCore import Qt
@@ -22,6 +21,8 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -30,7 +31,7 @@ from ..config import get_default
 from ..core.hotkey import HotkeyError, parse_hotkey, test_hotkey_available
 from ..core.prompts import SOURCE_LANGS, TARGET_LANGS
 from .worker import ListModelsWorker, TestConnectionWorker
-from .worker_util import track_worker
+from .worker_util import launch_worker, shutdown_worker
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +60,27 @@ class SettingsDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        backend_box = QWidget()
-        bf = QFormLayout(backend_box)
-        bf.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        # 创建标签页控件
+        tabs = QTabWidget()
+        tabs.addTab(self._build_model_tab(), "模型设置")
+        tabs.addTab(self._build_translation_tab(), "翻译设置")
+        tabs.addTab(self._build_hotkey_tab(), "热键设置")
+        layout.addWidget(tabs)
+
+        # 保存/取消按钮
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _build_model_tab(self) -> QWidget:
+        """构建模型设置标签页。"""
+        widget = QWidget()
+        layout = QFormLayout(widget)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.preset_combo = QComboBox()
         self.preset_combo.addItem("自定义", "")
@@ -72,6 +91,7 @@ class SettingsDialog(QDialog):
         self.base_url_edit = QLineEdit()
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+
         # 可编辑下拉框：既能从后端拉取模型列表选择，也支持手动输入
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
@@ -95,13 +115,14 @@ class SettingsDialog(QDialog):
             "改为将指令并入用户消息发送。"
         )
 
-        bf.addRow("后端预设", self.preset_combo)
-        bf.addRow("Base URL", self.base_url_edit)
-        bf.addRow("API Key", self.api_key_edit)
-        bf.addRow("模型名称", model_row)
-        bf.addRow("", self.fetch_result)
-        bf.addRow("", self.use_system_role_cb)
+        layout.addRow("后端预设", self.preset_combo)
+        layout.addRow("Base URL", self.base_url_edit)
+        layout.addRow("API Key", self.api_key_edit)
+        layout.addRow("模型名称", model_row)
+        layout.addRow("", self.fetch_result)
+        layout.addRow("", self.use_system_role_cb)
 
+        # 测试连接
         test_row = QHBoxLayout()
         self.test_btn = QPushButton("测试连接")
         self.test_btn.clicked.connect(self._on_test)
@@ -109,13 +130,24 @@ class SettingsDialog(QDialog):
         self.test_result.setWordWrap(True)
         test_row.addWidget(self.test_btn)
         test_row.addWidget(self.test_result, 1)
-        bf.addRow("", test_row)
+        layout.addRow("", test_row)
 
-        layout.addWidget(backend_box)
+        return widget
 
-        trans_box = QWidget()
-        tf = QFormLayout(trans_box)
-        tf.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+    def _build_translation_tab(self) -> QWidget:
+        """构建翻译设置标签页。"""
+        widget = QWidget()
+        layout = QFormLayout(widget)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.source_lang_combo = QComboBox()
+        self.source_lang_combo.addItems(SOURCE_LANGS)
+        self.source_lang_combo.setToolTip(
+            "选择源语言可辅助翻译。默认自动识别，由模型自行判断。"
+        )
+
+        self.target_lang_combo = QComboBox()
+        self.target_lang_combo.addItems(TARGET_LANGS)
 
         self.temperature_spin = QDoubleSpinBox()
         self.temperature_spin.setRange(0.0, 2.0)
@@ -133,23 +165,29 @@ class SettingsDialog(QDialog):
         self.style_combo = QComboBox()
         self.style_combo.addItems(["忠实原文", "自然流畅", "简洁精炼"])
 
-        self.source_lang_combo = QComboBox()
-        self.source_lang_combo.addItems(SOURCE_LANGS)
-        self.source_lang_combo.setToolTip(
-            "选择源语言可辅助翻译。默认自动识别，由模型自行判断。"
+        self.custom_prompt_btn = QPushButton("自定义提示词")
+        self.custom_prompt_btn.setToolTip(
+            "配置自定义系统提示词。留空则使用默认模板。"
         )
+        self.custom_prompt_btn.clicked.connect(self._on_edit_custom_prompt)
+        self.custom_prompt_status = QLabel("")
+        self.custom_prompt_status.setStyleSheet("color: #888; font-size: 11px;")
 
-        self.target_lang_combo = QComboBox()
-        self.target_lang_combo.addItems(TARGET_LANGS)
+        layout.addRow("源语言", self.source_lang_combo)
+        layout.addRow("目标语言", self.target_lang_combo)
+        layout.addRow("温度", self.temperature_spin)
+        layout.addRow("最大输出 tokens", self.max_tokens_spin)
+        layout.addRow("分块长度", self.chunk_spin)
+        layout.addRow("翻译风格", self.style_combo)
+        layout.addRow("", self.custom_prompt_btn)
+        layout.addRow("", self.custom_prompt_status)
 
-        tf.addRow("源语言", self.source_lang_combo)
-        tf.addRow("目标语言", self.target_lang_combo)
-        tf.addRow("温度", self.temperature_spin)
-        tf.addRow("最大输出 tokens", self.max_tokens_spin)
-        tf.addRow("分块长度", self.chunk_spin)
-        tf.addRow("翻译风格", self.style_combo)
+        return widget
 
-        layout.addWidget(trans_box)
+    def _build_hotkey_tab(self) -> QWidget:
+        """构建热键设置标签页。"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
 
         # 划词翻译分组
         sel_gb = QGroupBox("划词翻译")
@@ -158,9 +196,7 @@ class SettingsDialog(QDialog):
 
         self.selection_enabled_cb = QCheckBox("启用划词翻译")
         self.selection_hotkey_edit = QKeySequenceEdit()
-        self.selection_hotkey_edit.keySequenceChanged.connect(
-            self._validate_hotkey
-        )
+        self.selection_hotkey_edit.keySequenceChanged.connect(self._validate_hotkey)
         self._hotkey_validation = QLabel("")
         self._hotkey_validation.setStyleSheet("color: #888; font-size: 11px;")
         self.selection_min_chars_spin = QSpinBox()
@@ -190,14 +226,9 @@ class SettingsDialog(QDialog):
         ol.addRow("", self._ocr_hotkey_validation)
 
         layout.addWidget(ocr_gb)
+        layout.addStretch()
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self._on_save)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        return widget
 
     # ---------- 数据 ----------
     def _load_values(self) -> None:
@@ -232,6 +263,9 @@ class SettingsDialog(QDialog):
         style = t.get("style", get_default("translation", "style"))
         if self.style_combo.findText(style) >= 0:
             self.style_combo.setCurrentText(style)
+
+        # 更新自定义提示词状态显示
+        self._update_custom_prompt_status()
 
         sel = self._config.get("selection", {})
         self.selection_enabled_cb.setChecked(
@@ -322,6 +356,9 @@ class SettingsDialog(QDialog):
             target_lang=self.target_lang_combo.currentText(),
             chunk_chars=self.chunk_spin.value(),
             style=self.style_combo.currentText(),
+            custom_prompt=self._config.get("translation", {}).get(
+                "custom_prompt", get_default("translation", "custom_prompt")
+            ),
         )
         sel = self._config.setdefault("selection", {})
         sel.update(
@@ -403,7 +440,7 @@ class SettingsDialog(QDialog):
             return
 
         # 清理旧 worker（等待退出 + deleteLater）
-        self._cleanup_test_worker()
+        shutdown_worker(self, "_test_worker", "测试连接")
 
         self.test_btn.setEnabled(False)
         self.test_result.setText("测试中…")
@@ -416,12 +453,14 @@ class SettingsDialog(QDialog):
             use_system_role=self.use_system_role_cb.isChecked(),
             parent=self,
         )
-        self._test_worker.ok.connect(self._on_test_ok)
-        self._test_worker.err.connect(self._on_test_err)
-        self._test_worker.finished.connect(self._on_test_finished)
-        # 线程结束：先清 Python 引用、再删 C++ 对象，避免残留僵尸包装器
-        track_worker(self, "_test_worker", self._test_worker)
-        self._test_worker.start()
+        launch_worker(
+            self,
+            "_test_worker",
+            self._test_worker,
+            on_ok=self._on_test_ok,
+            on_err=self._on_test_err,
+            on_finished=self._on_test_finished,
+        )
 
     def _on_test_ok(self, reply: str) -> None:
         self.test_result.setText(
@@ -436,11 +475,6 @@ class SettingsDialog(QDialog):
     def _on_test_finished(self) -> None:
         self.test_btn.setEnabled(True)
 
-    def _cleanup_test_worker(self) -> None:
-        """安全清理旧测试线程：等待退出 + 断开信号 + deleteLater。"""
-        self._shutdown_worker(self._test_worker, "测试连接")
-        self._test_worker = None
-
     # ---------- 获取模型 ----------
     def _on_fetch_models(self) -> None:
         url = self.base_url_edit.text().strip()
@@ -450,7 +484,7 @@ class SettingsDialog(QDialog):
             return
 
         # 清理旧 worker（等待退出 + deleteLater）
-        self._cleanup_fetch_worker()
+        shutdown_worker(self, "_fetch_worker", "获取模型")
 
         self.fetch_btn.setEnabled(False)
         self.fetch_result.setText("获取中…")
@@ -459,12 +493,14 @@ class SettingsDialog(QDialog):
         self._fetch_worker = ListModelsWorker(
             url, self.api_key_edit.text().strip(), parent=self
         )
-        self._fetch_worker.ok.connect(self._on_fetch_ok)
-        self._fetch_worker.err.connect(self._on_fetch_err)
-        self._fetch_worker.finished.connect(self._on_fetch_finished)
-        # 线程结束：先清 Python 引用、再删 C++ 对象，避免残留僵尸包装器
-        track_worker(self, "_fetch_worker", self._fetch_worker)
-        self._fetch_worker.start()
+        launch_worker(
+            self,
+            "_fetch_worker",
+            self._fetch_worker,
+            on_ok=self._on_fetch_ok,
+            on_err=self._on_fetch_err,
+            on_finished=self._on_fetch_finished,
+        )
 
     def _on_fetch_ok(self, models: list[str]) -> None:
         if not models:
@@ -494,50 +530,76 @@ class SettingsDialog(QDialog):
     def _on_fetch_finished(self) -> None:
         self.fetch_btn.setEnabled(True)
 
-    def _cleanup_fetch_worker(self) -> None:
-        """安全清理旧获取模型线程：等待退出 + 断开信号 + deleteLater。"""
-        self._shutdown_worker(self._fetch_worker, "获取模型")
-        self._fetch_worker = None
+    # ---------- 自定义提示词 ----------
+    def _update_custom_prompt_status(self) -> None:
+        """更新自定义提示词状态标签。"""
+        custom_prompt = self._config.get("translation", {}).get(
+            "custom_prompt", get_default("translation", "custom_prompt")
+        )
+        if custom_prompt.strip():
+            self.custom_prompt_status.setText("✓ 已启用自定义提示词")
+            self.custom_prompt_status.setStyleSheet("color: #27ae60; font-size: 11px;")
+        else:
+            self.custom_prompt_status.setText("使用默认提示词模板")
+            self.custom_prompt_status.setStyleSheet("color: #888; font-size: 11px;")
 
-    @staticmethod
-    def _shutdown_worker(
-        w: TestConnectionWorker | ListModelsWorker | None, name: str
-    ) -> None:
-        """等待后台线程退出并断开信号，防止 QThread 析构时仍在运行。
-
-        对"僵尸"包装器（C++ 对象已被 deleteLater 删除）免疫：
-        任何 RuntimeError 直接静默跳过。
-
-        线程超时未退出时：仅断开结果信号（ok/err），保留 finished
-        信号不动，让线程自然结束后由 finished -> deleteLater 清理。
-        避免对运行中的 QThread 调用 deleteLater 导致崩溃。
-        """
-        if w is None:
-            return
-        try:
-            # 先请求取消（中断阻塞中的 HTTP 请求），缩短等待时间
-            w.request_stop()
-            if w.isRunning() and not w.wait(3000):
-                logger.warning("%s线程 3s 未退出，放弃等待", name)
-                # 线程仍在运行：仅断开结果信号，不 deleteLater
-                # finished 信号保留，线程结束后自动 _forget + deleteLater
-                with contextlib.suppress(TypeError, RuntimeError):
-                    w.ok.disconnect()
-                    w.err.disconnect()
-                return
-        except RuntimeError:
-            return  # C++ 对象已删除，无需清理
-        # 线程已结束：安全断开所有信号并调度删除
-        with contextlib.suppress(TypeError, RuntimeError):
-            w.ok.disconnect()
-            w.err.disconnect()
-            w.finished.disconnect()
-        # deleteLater 由 finished 信号触发；若线程已结束则立即调度
-        with contextlib.suppress(RuntimeError):
-            w.deleteLater()
+    def _on_edit_custom_prompt(self) -> None:
+        """打开自定义提示词编辑对话框。"""
+        current = self._config.get("translation", {}).get(
+            "custom_prompt", get_default("translation", "custom_prompt")
+        )
+        dialog = CustomPromptDialog(current, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_prompt = dialog.get_prompt()
+            self._config.setdefault("translation", {})["custom_prompt"] = new_prompt
+            self._update_custom_prompt_status()
 
     def closeEvent(self, event) -> None:
         # 安全清理后台线程，避免 QThread 析构时仍在运行
-        self._cleanup_test_worker()
-        self._cleanup_fetch_worker()
+        shutdown_worker(self, "_test_worker", "测试连接")
+        shutdown_worker(self, "_fetch_worker", "获取模型")
         super().closeEvent(event)
+
+
+class CustomPromptDialog(QDialog):
+    """自定义提示词编辑对话框。"""
+
+    def __init__(self, current_prompt: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("自定义系统提示词")
+        self.setMinimumSize(600, 400)
+        self._build_ui(current_prompt)
+
+    def _build_ui(self, current_prompt: str) -> None:
+        layout = QVBoxLayout(self)
+
+        hint = QLabel(
+            "自定义系统提示词将替代默认模板。留空则使用默认模板（支持源语言、目标语言、"
+            "翻译风格、术语表、上下文等参数）。\n\n"
+            "提示：自定义提示词中可以使用 {text} 占位符引用待翻译文本，"
+            "但通常不需要（系统会自动将文本作为用户消息发送）。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 11px; padding: 8px;")
+        layout.addWidget(hint)
+
+        self.prompt_edit = QTextEdit()
+        self.prompt_edit.setPlaceholderText(
+            "输入自定义系统提示词，例如：\n\n"
+            "You are a professional translator. Translate the following text "
+            "to Chinese, keeping the original tone and style."
+        )
+        self.prompt_edit.setPlainText(current_prompt)
+        layout.addWidget(self.prompt_edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_prompt(self) -> str:
+        """返回编辑后的提示词（去除首尾空白）。"""
+        return self.prompt_edit.toPlainText().strip()

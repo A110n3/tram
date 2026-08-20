@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Callable
 
 from PyQt6.QtCore import Qt
@@ -24,7 +23,7 @@ from .ocr_translator import OCRTranslator
 from .selection_translator import SelectionTranslator
 from .settings_dialog import SettingsDialog
 from .worker import TestConnectionWorker
-from .worker_util import track_worker
+from .worker_util import drop_worker, launch_worker, shutdown_worker
 
 
 class MainWindow(QMainWindow):
@@ -349,7 +348,7 @@ class MainWindow(QMainWindow):
 
     def _start_lang_test(self, lang: str) -> None:
         """后台测试模型连接，结果由 _on_lang_test_ok/_err 通知。"""
-        self._drop_lang_test_worker()
+        drop_worker(self, "_lang_test_worker")
         self._lang_test_lang = lang
         b = self._config.get("backend", {})
         w = TestConnectionWorker(
@@ -362,25 +361,13 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self._lang_test_worker = w
-        w.ok.connect(self._on_lang_test_ok)
-        w.err.connect(self._on_lang_test_err)
-        # 线程结束：先清 Python 引用、再删 C++ 对象，避免残留僵尸包装器
-        track_worker(self, "_lang_test_worker", w)
-        w.start()
-
-    def _drop_lang_test_worker(self) -> None:
-        """作废上一次未完成的测试：断开结果信号，线程自行结束并清理。
-
-        快速连续切换语言时，只认最新一次测试的结果。
-        """
-        w = self._lang_test_worker
-        if w is None:
-            return
-        with contextlib.suppress(TypeError, RuntimeError):
-            w.ok.disconnect(self._on_lang_test_ok)
-        with contextlib.suppress(TypeError, RuntimeError):
-            w.err.disconnect(self._on_lang_test_err)
-        self._lang_test_worker = None
+        launch_worker(
+            self,
+            "_lang_test_worker",
+            w,
+            on_ok=self._on_lang_test_ok,
+            on_err=self._on_lang_test_err,
+        )
 
     def _on_lang_test_ok(self, _reply: str) -> None:
         self._lang_test_worker = None
@@ -410,7 +397,7 @@ class MainWindow(QMainWindow):
         结果静默：成功不打扰用户；失败留给真实翻译按正常管线报错
         （预热请求与翻译请求无状态关联，失败不影响后者）。
         """
-        self._drop_warmup_worker()
+        drop_worker(self, "_warmup_worker", disconnect_results=False)
         b = self._config.get("backend", {})
         w = TestConnectionWorker(
             b.get("base_url", get_default("backend", "base_url")),
@@ -424,21 +411,7 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self._warmup_worker = w
-        track_worker(self, "_warmup_worker", w)
-        w.start()
-
-    def _drop_warmup_worker(self) -> None:
-        """作废进行中的预热：请求停止并中断阻塞的加载等待。"""
-        w = self._warmup_worker
-        self._warmup_worker = None
-        if w is None:
-            return
-        try:
-            w.request_stop()
-            if w.isRunning():
-                w.wait(2000)
-        except RuntimeError:
-            pass  # 僵尸包装器（C++ 对象已删除），无需处理
+        launch_worker(self, "_warmup_worker", w)
 
     def _apply_selection_config(self) -> None:
         """同步托盘菜单勾选状态与 tooltip，不负责启停热键或弹通知。
@@ -522,18 +495,10 @@ class MainWindow(QMainWindow):
         self._quitting = True
         # 先取消再等待进行中的预热线程：等待模型加载可长达配置超时
         # （180s），不取消的话退出时会销毁运行中的 QThread
-        self._drop_warmup_worker()
+        shutdown_worker(self, "_warmup_worker", "预热", timeout_ms=2000)
         # 先取消再等待进行中的连接测试：测试请求超时长达 30s，
         # 不取消的话 2s 等待必然超时，退出时会销毁运行中的 QThread
-        w = self._lang_test_worker
-        self._lang_test_worker = None
-        if w is not None:
-            try:
-                w.request_stop()
-                if w.isRunning():
-                    w.wait(2000)
-            except RuntimeError:
-                pass  # 僵尸包装器（C++ 对象已删除），无需处理
+        shutdown_worker(self, "_lang_test_worker", "语言测试", timeout_ms=2000)
         self._selection_translator.shutdown()
         self._ocr_translator.shutdown()
         app = QApplication.instance()

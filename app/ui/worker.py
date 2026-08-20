@@ -104,26 +104,20 @@ class OCRWorker(QThread):
             self.succeeded.emit(text)
 
 
-class TestConnectionWorker(QThread):
-    """后台执行连接测试，避免阻塞 UI。
+class _BackendRequestWorker(QThread):
+    """后台执行 backend 请求的通用基类，避免阻塞 UI。
 
-    设置对话框的「测试连接」按钮与托盘菜单切换目标语言共用。
-    自持 backend 引用（而非调用 test_connection）以支持取消：
-    退出/重开对话框时可立即中断 30s 超时内的阻塞请求。
-
-    timeout 可覆盖（默认 30s）：启动预热复用本 worker 等待本地
-    后端加载模型（Lemonade/Ollama 冷启动可达数分钟，30s 必超时）。
+    子类只需指定 backend 参数和请求操作，统一处理取消、清理逻辑。
     """
 
-    ok = pyqtSignal(str)
+    ok = pyqtSignal(object)  # 结果类型由子类决定
     err = pyqtSignal(str)
 
     def __init__(
         self,
         base_url: str,
         api_key: str,
-        model: str,
-        use_system_role: bool = True,
+        model: str = "",
         timeout: int = 30,
         parent=None,
     ):
@@ -131,7 +125,6 @@ class TestConnectionWorker(QThread):
         self._base_url = base_url
         self._api_key = api_key
         self._model = model
-        self._use_system_role = use_system_role
         self._timeout = timeout
         self._stopped = False
         self._backend: OpenAIBackend | None = None
@@ -144,7 +137,15 @@ class TestConnectionWorker(QThread):
             try:
                 b.cancel()
             except Exception:
-                logger.debug("测试连接 backend.cancel 异常", exc_info=True)
+                logger.debug("%s backend.cancel 异常", self._log_name(), exc_info=True)
+
+    def _log_name(self) -> str:
+        """子类覆盖以提供具体操作名称，用于日志。"""
+        return "后台请求"
+
+    def _execute_request(self, backend: OpenAIBackend) -> object:
+        """子类覆盖以执行具体请求操作，返回结果。"""
+        raise NotImplementedError
 
     def run(self) -> None:
         backend = OpenAIBackend(
@@ -152,67 +153,67 @@ class TestConnectionWorker(QThread):
         )
         self._backend = backend
         try:
-            reply = backend.chat(
-                build_test_messages(self._use_system_role),
-                temperature=0.0,
-                max_tokens=8,
-            )
+            result = self._execute_request(backend)
             if not self._stopped:
-                self.ok.emit(reply)
+                self.ok.emit(result)
         except Exception as e:
             if not self._stopped:
                 if not isinstance(e, BackendError):
-                    logger.warning("测试连接异常", exc_info=True)
+                    logger.warning("%s异常", self._log_name(), exc_info=True)
                 self.err.emit(str(e))
         finally:
             self._backend = None
             try:
                 backend.close()
             except Exception:
-                logger.debug("关闭测试连接 backend 异常", exc_info=True)
+                logger.debug("关闭%s backend 异常", self._log_name(), exc_info=True)
 
 
-class ListModelsWorker(QThread):
+class TestConnectionWorker(_BackendRequestWorker):
+    """后台执行连接测试，避免阻塞 UI。
+
+    设置对话框的「测试连接」按钮与托盘菜单切换目标语言共用。
+    自持 backend 引用（而非调用 test_connection）以支持取消：
+    退出/重开对话框时可立即中断 30s 超时内的阻塞请求。
+
+    timeout 可覆盖（默认 30s）：启动预热复用本 worker 等待本地
+    后端加载模型（Lemonade/Ollama 冷启动可达数分钟，30s 必超时）。
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        use_system_role: bool = True,
+        timeout: int = 30,
+        parent=None,
+    ):
+        super().__init__(base_url, api_key, model, timeout, parent)
+        self._use_system_role = use_system_role
+
+    def _log_name(self) -> str:
+        return "测试连接"
+
+    def _execute_request(self, backend: OpenAIBackend) -> str:
+        return backend.chat(
+            build_test_messages(self._use_system_role),
+            temperature=0.0,
+            max_tokens=8,
+        )
+
+
+class ListModelsWorker(_BackendRequestWorker):
     """后台执行 list_models（GET /models），避免阻塞 UI。
 
     设置对话框的「获取模型」按钮使用。自持 backend 以支持取消。
     """
 
-    ok = pyqtSignal(list)
-    err = pyqtSignal(str)
-
     def __init__(self, base_url: str, api_key: str, parent=None):
-        super().__init__(parent)
-        self._base_url = base_url
-        self._api_key = api_key
-        self._stopped = False
-        self._backend: OpenAIBackend | None = None
+        super().__init__(base_url, api_key, timeout=15, parent=parent)
 
-    def request_stop(self) -> None:
-        """请求停止：丢弃结果并中断进行中的请求。"""
-        self._stopped = True
-        b = self._backend
-        if b is not None:
-            try:
-                b.cancel()
-            except Exception:
-                logger.debug("获取模型 backend.cancel 异常", exc_info=True)
+    def _log_name(self) -> str:
+        return "获取模型列表"
 
-    def run(self) -> None:
-        backend = OpenAIBackend(self._base_url, self._api_key, timeout=15)
-        self._backend = backend
-        try:
-            models = backend.list_models()
-            if not self._stopped:
-                self.ok.emit(models)
-        except Exception as e:
-            if not self._stopped:
-                if not isinstance(e, BackendError):
-                    logger.warning("获取模型列表异常", exc_info=True)
-                self.err.emit(str(e))
-        finally:
-            self._backend = None
-            try:
-                backend.close()
-            except Exception:
-                logger.debug("关闭获取模型 backend 异常", exc_info=True)
+    def _execute_request(self, backend: OpenAIBackend) -> list[str]:
+        return backend.list_models()

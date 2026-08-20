@@ -74,6 +74,7 @@ def build_messages(
     glossary_block: str = "",
     context_block: str = "",
     merge_system: bool = False,
+    custom_prompt: str = "",
 ) -> list[dict]:
     """构造发给后端的 messages 列表。
 
@@ -82,21 +83,26 @@ def build_messages(
     glossary_block / context_block 由调用方生成（见 glossary.to_prompt_block）。
     merge_system=True 时把系统提示词并入单条 user 消息，
     用于不支持 system 角色的后端。
+    custom_prompt: 自定义系统提示词，非空时直接使用，忽略默认模板。
     """
-    # 源语言指令：自动识别时为空（模型天然支持），显式时注入提示
-    if source_lang != AUTO_DETECT:
-        src_en = LANG_EN.get(source_lang, source_lang)
-        source_instruction = f"The source text is in {src_en}. "
+    # 优先使用自定义提示词
+    if custom_prompt.strip():
+        system = custom_prompt.strip()
     else:
-        source_instruction = ""
+        # 源语言指令：自动识别时为空（模型天然支持），显式时注入提示
+        if source_lang != AUTO_DETECT:
+            src_en = LANG_EN.get(source_lang, source_lang)
+            source_instruction = f"The source text is in {src_en}. "
+        else:
+            source_instruction = ""
 
-    system = SYSTEM_TEMPLATE.format(
-        source_instruction=source_instruction,
-        target_lang=LANG_EN.get(target_lang, target_lang),
-        style=STYLE_EN.get(style, style),
-        glossary_block=glossary_block,
-        context_block=context_block,
-    )
+        system = SYSTEM_TEMPLATE.format(
+            source_instruction=source_instruction,
+            target_lang=LANG_EN.get(target_lang, target_lang),
+            style=STYLE_EN.get(style, style),
+            glossary_block=glossary_block,
+            context_block=context_block,
+        )
     if merge_system:
         return [
             {"role": "user", "content": f"{system}\n\nText to translate:\n{text}"}

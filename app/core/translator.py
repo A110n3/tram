@@ -87,6 +87,7 @@ class Translator:
         )
 
         glossary_block = to_prompt_block(self.config.get("glossary", []))
+        custom_prompt = tcfg.get("custom_prompt", get_default("translation", "custom_prompt"))
         chunks = split_text(text, chunk_chars)
 
         full_result: list[str] = []
@@ -114,6 +115,7 @@ class Translator:
                 glossary_block=glossary_block,
                 context_block=context_block,
                 merge_system=not use_system_role,
+                custom_prompt=custom_prompt,
             )
 
             result = self._translate_chunk(

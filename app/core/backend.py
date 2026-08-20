@@ -6,7 +6,7 @@
 - vLLM / 其他:  自定义 base_url
 
 统一接口：chat_stream()（流式）与 chat()（非流式）。
-支持通过 close() 中断进行中的流式请求。
+支持通过 cancel() 中断进行中的流式请求，同时保持连接池复用。
 """
 
 from __future__ import annotations
@@ -63,6 +63,9 @@ class OpenAIBackend:
             base_url=self.base_url, timeout=timeout, trust_env=False
         )
         self._cancel_event = threading.Event()
+        # 当前活跃的响应对象，用于细粒度取消（只关闭当前请求的流）
+        self._current_response: httpx.Response | None = None
+        self._response_lock = threading.Lock()
 
     def _headers(self) -> dict:
         return {
@@ -71,10 +74,10 @@ class OpenAIBackend:
         }
 
     def _ensure_client(self) -> httpx.Client:
-        """返回可用的 httpx 客户端；被 cancel/close 关闭后自动重建。
+        """返回可用的 httpx 客户端；被 close 关闭后自动重建。
 
-        cancel() 通过关闭连接来中断阻塞中的请求，之后后端对象
-        仍需可复用（划词翻译共享同一实例），故按需重建。
+        注意：cancel() 现在只关闭当前请求，不关闭整个 client，
+        因此连接池可以在多次请求间复用，提升性能。
         """
         if self._client.is_closed:
             self._client = httpx.Client(
@@ -119,10 +122,19 @@ class OpenAIBackend:
             "max_tokens": max_tokens,
             "stream": True,
         }
+
         try:
-            with self._ensure_client().stream(
+            # 在 stream() 外部就获取响应对象，这样 cancel() 可以打断连接建立阶段
+            req = self._ensure_client().build_request(
                 "POST", "/chat/completions", json=payload, headers=self._headers()
-            ) as resp:
+            )
+            resp = self._ensure_client().send(req, stream=True)
+
+            # 记录当前响应对象，供 cancel() 关闭
+            with self._response_lock:
+                self._current_response = resp
+
+            try:
                 if resp.status_code >= 400:
                     body = resp.read().decode("utf-8", errors="replace")
                     body = body.strip()[:500] or "（无响应体）"
@@ -148,6 +160,14 @@ class OpenAIBackend:
                         continue
                     if token and on_token:
                         on_token(token)
+            finally:
+                # 清除当前响应引用并关闭响应
+                with self._response_lock:
+                    self._current_response = None
+                try:
+                    resp.close()
+                except Exception:
+                    pass
         except httpx.HTTPError as e:
             if self._cancel_event.is_set():
                 raise StreamCancelled() from e  # 取消导致的网络错误
@@ -197,21 +217,46 @@ class OpenAIBackend:
         return self._cancel_event.wait(seconds)
 
     def cancel(self) -> None:
-        """中断进行中的流式请求，并保证后端对象之后仍可复用。
+        """中断进行中的流式请求，同时保持连接池可复用。
 
-        仅靠 _cancel_event 无法打断阻塞在套接字 recv 上的线程（后端
-        加载模型时请求会长时间无响应），必须关闭底层连接让阻塞的
-        读取立刻抛错退出。下一次 chat_stream 会通过 _ensure_client
-        重建连接，cancel_event 在每次请求开始时清除。
+        采用两步策略：
+        1. 设置取消事件：通知正在读取响应的线程退出
+        2. 关闭响应对象（若已创建）：打断阻塞的读取
+        3. 关闭 client：强制中断阻塞在连接建立或首字节等待的请求
 
-        实现等同 close()：cancel 语义强调"中断后可复用"，
-        close 语义强调"用完关闭"，两者行为一致。
+        关闭 client 后，下次请求会自动重建连接池。
         """
-        self.close()
+        self._cancel_event.set()
+
+        with self._response_lock:
+            resp = self._current_response
+
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                logger.debug("关闭响应流时异常", exc_info=True)
+
+        # 始终关闭 client，确保阻塞在连接建立或首字节等待的请求被打断
+        try:
+            self._client.close()
+        except Exception:
+            logger.debug("关闭 client 时异常", exc_info=True)
 
     def close(self) -> None:
-        """关闭底层连接，中断进行中的请求。"""
+        """关闭底层连接池，释放所有资源。
+
+        应用退出时调用，或需要完全清理后端对象时调用。
+        日常的取消操作应使用 cancel()，它不会破坏连接池。
+        """
         self._cancel_event.set()
+        with self._response_lock:
+            if self._current_response is not None:
+                try:
+                    self._current_response.close()
+                except Exception:
+                    logger.debug("关闭响应流时异常", exc_info=True)
+                self._current_response = None
         try:
             self._client.close()
         except Exception:

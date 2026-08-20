@@ -57,6 +57,7 @@ class TranslationConfig:
     target_lang: str = "中文（简体）"
     chunk_chars: int = 2000
     style: str = "忠实原文"
+    custom_prompt: str = ""  # 自定义系统提示词，为空时使用默认模板
 
 
 @dataclass

@@ -38,7 +38,7 @@ class BaseHotkeyTranslator(QObject):
 
     hotkey_status = pyqtSignal(bool, str)
 
-    # 子类必须覆盖：config 配置节名 / 通知中的服务名 / RegisterHotKey id
+    # 子类必须覆盖：config 配置节名 / 状态消息中的服务名 / RegisterHotKey id
     section: ClassVar[str] = ""
     service_name: ClassVar[str] = ""
     hotkey_id: ClassVar[int] = 1
@@ -76,7 +76,7 @@ class BaseHotkeyTranslator(QObject):
 
         先确保旧的监听线程已停止并从所有信号断开，避免信号连接累积
         导致后续线程触发的槽重复执行或状态错乱。旧线程未能退出时
-        放弃本次注册并通知用户（不静默失败）。
+        放弃本次注册并发出状态消息（不静默失败）。
         """
         if not self._config.get(self.section, {}).get(
             "enabled", get_default(self.section, "enabled")

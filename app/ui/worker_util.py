@@ -54,7 +54,7 @@ def launch_worker(
     创建 worker、连接 ok/err/finished 信号、track_worker、start。
 
     owner: 持有 worker 的对象（self）
-    attr: worker 属性名（如 "_lang_test_worker"）
+    attr: worker 属性名（如 "_warmup_worker"）
     worker: 要启动的 _BackendRequestWorker 实例
     on_ok: ok 信号回调（可选）
     on_err: err 信号回调（可选）
@@ -74,7 +74,7 @@ def drop_worker(owner: object, attr: str, disconnect_results: bool = True) -> No
     """作废 worker：断开结果信号，线程自行结束并清理。
 
     owner: 持有 worker 的对象（self）
-    attr: worker 属性名（如 "_lang_test_worker"）
+    attr: worker 属性名（如 "_warmup_worker"）
     disconnect_results: 是否断开 ok/err 信号（默认 True）
 
     适用于快速连续触发时只认最新一次结果的场景

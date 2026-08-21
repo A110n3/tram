@@ -54,7 +54,7 @@ class OCRTranslator(BaseHotkeyTranslator):
             self._popup = None
         self._close_overlay()
 
-        # 2. OCR 引擎缺失时托盘引导，不弹覆盖层
+        # 2. OCR 引擎缺失：发出状态消息（主窗口统一写日志），不弹覆盖层
         if not is_rapidocr_available():
             self.hotkey_status.emit(
                 False,

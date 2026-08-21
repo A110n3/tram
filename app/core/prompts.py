@@ -66,6 +66,34 @@ Requirements:
 {context_block}"""
 
 
+def build_default_system_prompt(
+    target_lang: str,
+    source_lang: str = AUTO_DETECT,
+    style: str = "忠实原文",
+    glossary_block: str = "",
+    context_block: str = "",
+) -> str:
+    """按翻译参数渲染内置默认系统提示词。
+
+    默认模板的唯一渲染出口：翻译管线（build_messages）与设置对话框
+    的自定义提示词预填充/恢复默认共用此函数，保证所见即所得。
+    """
+    # 源语言指令：自动识别时为空（模型天然支持），显式时注入提示
+    if source_lang != AUTO_DETECT:
+        src_en = LANG_EN.get(source_lang, source_lang)
+        source_instruction = f"The source text is in {src_en}. "
+    else:
+        source_instruction = ""
+
+    return SYSTEM_TEMPLATE.format(
+        source_instruction=source_instruction,
+        target_lang=LANG_EN.get(target_lang, target_lang),
+        style=STYLE_EN.get(style, style),
+        glossary_block=glossary_block,
+        context_block=context_block,
+    ).strip()
+
+
 def build_messages(
     text: str,
     target_lang: str,
@@ -89,17 +117,10 @@ def build_messages(
     if custom_prompt.strip():
         system = custom_prompt.strip()
     else:
-        # 源语言指令：自动识别时为空（模型天然支持），显式时注入提示
-        if source_lang != AUTO_DETECT:
-            src_en = LANG_EN.get(source_lang, source_lang)
-            source_instruction = f"The source text is in {src_en}. "
-        else:
-            source_instruction = ""
-
-        system = SYSTEM_TEMPLATE.format(
-            source_instruction=source_instruction,
-            target_lang=LANG_EN.get(target_lang, target_lang),
-            style=STYLE_EN.get(style, style),
+        system = build_default_system_prompt(
+            target_lang=target_lang,
+            source_lang=source_lang,
+            style=style,
             glossary_block=glossary_block,
             context_block=context_block,
         )

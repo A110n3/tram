@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 
 from ..config import get_default
 from ..core.hotkey import HotkeyError, parse_hotkey, test_hotkey_available
-from ..core.prompts import SOURCE_LANGS, TARGET_LANGS
+from ..core.prompts import SOURCE_LANGS, TARGET_LANGS, build_default_system_prompt
 from .worker import ListModelsWorker, TestConnectionWorker
 from .worker_util import launch_worker, shutdown_worker
 
@@ -559,9 +559,20 @@ class SettingsDialog(QDialog):
         current = self._config.get("translation", {}).get(
             "custom_prompt", get_default("translation", "custom_prompt")
         )
-        dialog = CustomPromptDialog(current, parent=self)
+        # 按当前标签页的语言/风格渲染内置模板，供预填充与一键恢复
+        default_prompt = build_default_system_prompt(
+            target_lang=self.target_lang_combo.currentText(),
+            source_lang=self.source_lang_combo.currentText(),
+            style=self.style_combo.currentText(),
+        )
+        dialog = CustomPromptDialog(current, default_prompt, parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_prompt = dialog.get_prompt()
+            # 内容与内置模板一致时视为恢复默认：清空自定义提示词，
+            # 回到动态模板——术语表/上下文仍随翻译自动注入，语言/风格
+            # 后续改动继续生效，避免把当前参数固化进提示词
+            if new_prompt == default_prompt:
+                new_prompt = ""
             self._config.setdefault("translation", {})["custom_prompt"] = new_prompt
             self._update_custom_prompt_status()
 
@@ -573,20 +584,26 @@ class SettingsDialog(QDialog):
 
 
 class CustomPromptDialog(QDialog):
-    """自定义提示词编辑对话框。"""
+    """自定义提示词编辑对话框。
 
-    def __init__(self, current_prompt: str, parent=None):
+    未设置自定义提示词时，输入框预填充按当前语言/风格渲染的内置
+    默认模板，用户可直接在其基础上修改；「恢复默认值」一键填回。
+    """
+
+    def __init__(self, current_prompt: str, default_prompt: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("自定义系统提示词")
         self.setMinimumSize(600, 400)
-        self._build_ui(current_prompt)
+        self._default_prompt = default_prompt
+        self._build_ui(current_prompt.strip() or default_prompt)
 
-    def _build_ui(self, current_prompt: str) -> None:
+    def _build_ui(self, initial_prompt: str) -> None:
         layout = QVBoxLayout(self)
 
         hint = QLabel(
-            "自定义系统提示词将替代默认模板。留空则使用默认模板（支持源语言、目标语言、"
-            "翻译风格、术语表、上下文等参数）。\n\n"
+            "自定义系统提示词将原样替代默认模板（术语表、上下文等运行时参数不再自动注入）；"
+            "留空则使用内置模板（源语言、目标语言、翻译风格、术语表、上下文自动生效）。"
+            "未自定义时输入框预填充内置模板，可直接修改。\n\n"
             "提示：自定义提示词中可以使用 {text} 占位符引用待翻译文本，"
             "但通常不需要（系统会自动将文本作为用户消息发送）。"
         )
@@ -600,16 +617,25 @@ class CustomPromptDialog(QDialog):
             "You are a professional translator. Translate the following text "
             "to Chinese, keeping the original tone and style."
         )
-        self.prompt_edit.setPlainText(current_prompt)
+        self.prompt_edit.setPlainText(initial_prompt)
         layout.addWidget(self.prompt_edit)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
         )
+        restore_btn = buttons.addButton(
+            "恢复默认值", QDialogButtonBox.ButtonRole.ResetRole
+        )
+        assert restore_btn is not None  # addButton(str, role) 总是创建成功
+        restore_btn.clicked.connect(self._on_restore_default)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _on_restore_default(self) -> None:
+        """一键填回内置默认提示词（按打开对话框时的语言/风格渲染）。"""
+        self.prompt_edit.setPlainText(self._default_prompt)
 
     def get_prompt(self) -> str:
         """返回编辑后的提示词（去除首尾空白）。"""

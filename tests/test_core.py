@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.core.backend import BackendError, StreamCancelled
 from app.core.chunking import split_text
 from app.core.glossary import to_prompt_block
-from app.core.prompts import build_messages
+from app.core.prompts import build_default_system_prompt, build_messages
 from app.core.translator import Translator
 
 
@@ -106,6 +106,39 @@ def test_build_messages_merge_system():
     assert msgs[0]["role"] == "user"
     assert "Simplified Chinese" in msgs[0]["content"]
     assert "hello" in msgs[0]["content"]
+
+
+def test_default_prompt_matches_build_messages():
+    """build_default_system_prompt 是默认模板唯一渲染出口：
+    build_messages 未传自定义提示词时，system 内容必须与之一致。"""
+    kwargs = {
+        "target_lang": "中文（简体）",
+        "source_lang": "英语",
+        "style": "自然流畅",
+        "glossary_block": "Glossary:\n- API => 接口",
+        "context_block": "Previously: 你好",
+    }
+    msgs = build_messages("hello", **kwargs)
+    assert msgs[0]["content"] == build_default_system_prompt(**kwargs)
+
+
+def test_default_prompt_renders_lang_and_style():
+    """语言/风格映射为英文；自动识别时不注入源语言指令。"""
+    prompt = build_default_system_prompt(
+        target_lang="中文（简体）", source_lang="英语", style="自然流畅"
+    )
+    assert "The source text is in English." in prompt
+    assert "Simplified Chinese" in prompt
+    assert "natural and fluent" in prompt
+    auto = build_default_system_prompt(target_lang="英语")
+    assert "source text is in" not in auto.lower()
+
+
+def test_default_prompt_empty_blocks_stripped():
+    """术语表/上下文为空时，渲染结果不带多余空行（供对话框预填充展示）。"""
+    prompt = build_default_system_prompt(target_lang="英语")
+    assert prompt == prompt.strip()
+    assert not prompt.endswith("\n")
 
 
 def test_is_retryable_status_ranges():

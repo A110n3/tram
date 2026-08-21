@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from PyQt6.QtCore import Qt
@@ -25,6 +26,8 @@ from .settings_dialog import SettingsDialog
 from .worker import TestConnectionWorker
 from .worker_util import drop_worker, launch_worker, shutdown_worker
 
+logger = logging.getLogger(__name__)
+
 
 class MainWindow(QMainWindow):
     def __init__(self, config: dict):
@@ -43,36 +46,27 @@ class MainWindow(QMainWindow):
         # 划词翻译服务
         self._selection_translator = SelectionTranslator(self._config)
         self._selection_translator.hotkey_status.connect(
-            lambda ok, msg: self._on_hotkey_status(ok, msg, "划词")
+            lambda ok, msg: self._log_hotkey_status(ok, msg, "划词")
         )
 
         # OCR 识图翻译服务
         self._ocr_translator = OCRTranslator(self._config)
         self._ocr_translator.hotkey_status.connect(
-            lambda ok, msg: self._on_hotkey_status(ok, msg, "OCR")
+            lambda ok, msg: self._log_hotkey_status(ok, msg, "OCR")
         )
-
-        # 切换目标语言后的连接测试线程
-        self._lang_test_worker: TestConnectionWorker | None = None
-        self._lang_test_lang: str = ""
 
         # 模型预热线程（启动/切换模型后触发，见 _start_warmup）
         self._warmup_worker: TestConnectionWorker | None = None
-
-        # 各服务最新状态：合并进唯一一条托盘通知展示（见 _show_aggregated_status）
-        self._statuses: dict[str, tuple[bool, str]] = {}
 
         # 托盘
         self._create_tray()
         self._apply_selection_config()
 
-        # 启动划词翻译（如果已启用），热键注册结果由 _on_hotkey_status 统一通知
+        # 启动划词翻译（如果已启用），注册结果仅写日志（静默运行）
         if self._config.get("selection", {}).get(
             "enabled", get_default("selection", "enabled")
         ):
             self._selection_translator.start()
-        else:
-            self._show_aggregated_status(extra="点击托盘图标开启划词翻译")
 
         # 启动 OCR 识图翻译（如果已启用）
         if self._config.get("ocr", {}).get("enabled", get_default("ocr", "enabled")):
@@ -279,46 +273,16 @@ class MainWindow(QMainWindow):
             if menu is not None:
                 menu.exec(QCursor.pos())
 
-    def _show_aggregated_status(
-        self,
-        extra: str = "",
-        icon: QSystemTrayIcon.MessageIcon | None = None,
-    ) -> None:
-        """把所有服务状态合并进唯一一条托盘通知展示。
-
-        Windows 托盘通知会互相顶替、同一时刻只能看见一条：
-        分条发送时后发的会把先发的挤没（且 msecs 参数被忽略，
-        展示时长由系统管理）。合并成一条后不存在互相顶替，
-        状态更新时用新内容整体替换旧通知，用户一眼看到全部状态。
-
-        extra: 一次性附加信息（如目标语言切换结果），不记入
-        _statuses，仅随本次展示。
-        """
-        lines = [f"{service}：{msg}" for service, (_ok, msg) in self._statuses.items()]
-        if extra:
-            lines.append(extra)
-        if not lines:
-            return
-        if icon is None:
-            failed = any(not ok for ok, _ in self._statuses.values())
-            icon = (
-                QSystemTrayIcon.MessageIcon.Warning
-                if failed
-                else QSystemTrayIcon.MessageIcon.Information
-            )
-        self._tray_icon.showMessage("Tram", "\n".join(lines), icon)
-
     def _toggle_selection(self) -> None:
         enabled = self._selection_action.isChecked()
         self._config.setdefault("selection", {})["enabled"] = enabled
         save_config(self._config)
         if enabled:
-            # 开启结果由 hotkey_status 信号记入状态并展示
+            # 开启结果由 hotkey_status 信号写入日志
             self._selection_translator.start()
         else:
             self._selection_translator.stop()
-            self._statuses["划词"] = (True, "已关闭")
-            self._show_aggregated_status()
+            logger.info("划词翻译已关闭")
         self._apply_selection_config()
 
     def _toggle_ocr(self) -> None:
@@ -329,62 +293,22 @@ class MainWindow(QMainWindow):
             self._ocr_translator.start()
         else:
             self._ocr_translator.stop()
-            self._statuses["OCR"] = (True, "已关闭")
-            self._show_aggregated_status()
+            logger.info("OCR 识图翻译已关闭")
         self._apply_selection_config()
 
     def _on_target_lang_changed(self, action: QAction) -> None:
-        """托盘菜单快捷切换目标语言。
+        """托盘菜单快捷切换目标语言：保存配置即时生效。
 
-        即时保存配置，随后后台测试模型连接，测试通过后才弹出
-        切换成功通知；失败则弹出警告，避免用户以为已生效。
+        翻译参数变化后清空去重缓存，用户可立即用同一文本重新
+        翻译验证效果；后端不可用等异常由真实翻译的浮窗报错呈现。
         """
         lang = action.text()
         self._config.setdefault("translation", {})["target_lang"] = lang
         save_config(self._config)
+        logger.info("目标语言已切换为 %s", lang)
         # 目标语言变化后，允许立即用同一文本重新翻译验证效果
         self._selection_translator.invalidate_last_text()
         self._ocr_translator.invalidate_last_text()
-        self._start_lang_test(lang)
-
-    def _start_lang_test(self, lang: str) -> None:
-        """后台测试模型连接，结果由 _on_lang_test_ok/_err 通知。"""
-        drop_worker(self, "_lang_test_worker")
-        self._lang_test_lang = lang
-        b = self._config.get("backend", {})
-        w = TestConnectionWorker(
-            b.get("base_url", get_default("backend", "base_url")),
-            b.get("api_key", get_default("backend", "api_key")),
-            b.get("model", get_default("backend", "model")),
-            use_system_role=bool(
-                b.get("use_system_role", get_default("backend", "use_system_role"))
-            ),
-            parent=self,
-        )
-        self._lang_test_worker = w
-        launch_worker(
-            self,
-            "_lang_test_worker",
-            w,
-            on_ok=self._on_lang_test_ok,
-            on_err=self._on_lang_test_err,
-        )
-
-    def _on_lang_test_ok(self, _reply: str) -> None:
-        self._lang_test_worker = None
-        self._show_aggregated_status(
-            extra=f"目标语言已切换为 {self._lang_test_lang}"
-        )
-
-    def _on_lang_test_err(self, message: str) -> None:
-        self._lang_test_worker = None
-        self._show_aggregated_status(
-            extra=(
-                f"目标语言已切换为 {self._lang_test_lang}，"
-                f"但模型连接测试失败：\n{message.strip()[:120]}"
-            ),
-            icon=QSystemTrayIcon.MessageIcon.Warning,
-        )
 
     # ---------- 模型预热 ----------
     def _start_warmup(self) -> None:
@@ -415,10 +339,9 @@ class MainWindow(QMainWindow):
         launch_worker(self, "_warmup_worker", w)
 
     def _apply_selection_config(self) -> None:
-        """同步托盘菜单勾选状态与 tooltip，不负责启停热键或弹通知。
+        """同步托盘菜单勾选状态与 tooltip，不负责启停热键。
 
-        热键启停由 _toggle_* / rebuild_backend / __init__ 负责，
-        通知由 _on_hotkey_status 回调统一处理，避免重复弹窗。
+        热键启停由 _toggle_* / rebuild_backend / __init__ 负责。
         """
         sel = self._config.get("selection", {})
         ocr = self._config.get("ocr", {})
@@ -430,14 +353,16 @@ class MainWindow(QMainWindow):
         ocr_on = "开" if ocr_enabled else "关"
         self._tray_icon.setToolTip(f"Tram - 划词: {sel_on} | OCR: {ocr_on}")
 
-    def _on_hotkey_status(self, ok: bool, message: str, service: str) -> None:
-        """热键注册结果/引导消息：记入该服务状态，合并展示。
+    def _log_hotkey_status(self, ok: bool, message: str, service: str) -> None:
+        """热键注册结果/引导消息：仅写日志，静默运行不打扰用户。
 
-        消息原样记录：注册失败消息自带「热键 X 注册失败」表述，
-        引导类消息（如 OCR 引擎未安装）不是注册失败，不能加前缀。
+        注册失败、OCR 引擎未安装等信息落入 tram.log 便于排查；
+        用户侧无系统通知，翻译本身的成败仍由悬浮窗呈现。
         """
-        self._statuses[service] = (ok, message)
-        self._show_aggregated_status()
+        if ok:
+            logger.info("[%s] %s", service, message)
+        else:
+            logger.warning("[%s] %s", service, message)
 
     # ---------- 菜单 ----------
     def open_settings(self) -> None:
@@ -497,9 +422,6 @@ class MainWindow(QMainWindow):
         # 先取消再等待进行中的预热线程：等待模型加载可长达配置超时
         # （180s），不取消的话退出时会销毁运行中的 QThread
         shutdown_worker(self, "_warmup_worker", "预热", timeout_ms=2000)
-        # 先取消再等待进行中的连接测试：测试请求超时长达 30s，
-        # 不取消的话 2s 等待必然超时，退出时会销毁运行中的 QThread
-        shutdown_worker(self, "_lang_test_worker", "语言测试", timeout_ms=2000)
         self._selection_translator.shutdown()
         self._ocr_translator.shutdown()
         app = QApplication.instance()

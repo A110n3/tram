@@ -102,7 +102,8 @@ class TranslationPopup(QFrame):
         close_btn.setObjectName("TramClose")
         close_btn.clicked.connect(self._on_close_clicked)
 
-        # 重试按钮：仅翻译阶段（慢提示/失败）显示，OCR 识别阶段隐藏
+        # 重试按钮：翻译相关状态（加载/流式/完成/缓存展示/失败）常驻显示，
+        # 仅 OCR 识别阶段与无文本可重试的死路错误隐藏
         retry_btn = QPushButton("⟳")
         retry_btn.setFixedSize(20, 20)
         retry_btn.setFlat(True)
@@ -193,7 +194,6 @@ class TranslationPopup(QFrame):
     def append_token(self, token: str) -> None:
         """流式追加译文。仅当用户未向上翻看时自动跟随到底部。"""
         self._stop_loading_hints()
-        self._retry_btn.hide()  # 已有产出，重试无意义
         bar = self._vbar
         stick_to_bottom = bar.value() >= bar.maximum() - 4
 
@@ -209,7 +209,6 @@ class TranslationPopup(QFrame):
 
     def set_translation(self, text: str) -> None:
         self._stop_loading_hints()
-        self._retry_btn.hide()
         bar = self._vbar
         stick_to_bottom = bar.value() >= bar.maximum() - 4
         self._target_label.setText(text)
@@ -288,9 +287,11 @@ class TranslationPopup(QFrame):
         """直接展示缓存的译文（重复触发同一文本，无需重新翻译）。
 
         与完整翻译流程的终态一致：可复制、可滚动、失焦自动隐藏。
+        显式显示重试按钮：缓存路径不经过 show_loading（每次热键都是
+        全新浮窗实例，按钮初始隐藏），用户可点 ⟳ 强制重新请求翻译。
         """
         self._stop_loading_hints()
-        self._retry_btn.hide()
+        self._retry_btn.show()
         self._target_label.setStyleSheet("")  # 清除错误样式
         self._target_label.setText(text)
         self._scroll_to_top()

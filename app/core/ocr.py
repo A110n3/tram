@@ -130,9 +130,8 @@ def _validate_env(languages: str) -> None:
 def png_to_ndarray(png: bytes) -> Any:
     """PNG 字节流解码为 BGR ndarray（cv2.imdecode）。
 
-    供区域监控线程复用：监控循环在后台线程持 ndarray 做帧差比对，
-    避免与 QPixmap（仅主线程可用）耦合。cv2/numpy 是 rapidocr 的
-    必然依赖，此处不再探测可用性。
+    在 worker 线程以 ndarray 形式做识别，避免与 QPixmap（仅主线程
+    可用）耦合。cv2/numpy 是 rapidocr 的必然依赖，此处不再探测可用性。
     """
     import cv2
     import numpy as np
@@ -146,8 +145,8 @@ def png_to_ndarray(png: bytes) -> Any:
 def ocr_lines(img: Any, languages: str = "ch") -> list[tuple[str, float]]:
     """对 BGR ndarray 执行 OCR，返回 [(文本, 置信度), ...]。
 
-    区域监控使用：带置信度以便按行过滤低质量识别，抑制动态背景
-    下的误读。识别失败抛 OCRError；无文字返回空列表。
+    带置信度以便调用方按行过滤低质量识别。识别失败抛 OCRError；
+    无文字返回空列表。
     """
     _validate_env(languages)
     engine = _get_engine()

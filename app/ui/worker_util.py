@@ -78,7 +78,7 @@ def drop_worker(owner: object, attr: str, disconnect_results: bool = True) -> No
     disconnect_results: 是否断开 ok/err 信号（默认 True）
 
     适用于快速连续触发时只认最新一次结果的场景
-    （如连续切换语言，只认最后一次测试结果）。
+    （如重复打开设置/切换模型时重启预热，旧预热的结果不再关心）。
     """
     w = getattr(owner, attr, None)
     if w is None:

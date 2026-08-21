@@ -159,7 +159,7 @@ class BaseHotkeyTranslator(QObject):
         )
         # 用户点关闭按钮时真正取消翻译：中断请求、释放被占用的后端
         self._popup.close_requested.connect(self._cancel_workers)
-        # 用户点重试按钮时：取消当前翻译并用同一文本重新翻译
+        # 用户点重试按钮时：用同一文本重新请求翻译（完成后/缓存展示亦可）
         self._popup.retry_requested.connect(self._on_retry_requested)
         return self._popup
 
@@ -228,12 +228,18 @@ class BaseHotkeyTranslator(QObject):
 
     # ---------- 翻译回调 ----------
     def _on_retry_requested(self) -> None:
-        """浮窗重试按钮：取消进行中的翻译，用同一文本重新翻译。
+        """浮窗重试按钮：用同一文本重新请求翻译。
 
-        覆盖两类场景：失败后重试（_on_translate_failed 已清去重缓存）
-        与慢加载时主动重发（取消会中断阻塞在模型加载上的请求）。
+        翻译相关状态均可点击：进行中（先取消在途请求）、失败后、
+        完成后与缓存展示态。完成/缓存态下 _pending_text 可能已被
+        清空（如中途点过 ✕），回退从去重缓存取原文。
+
+        重试前先清空去重缓存：重试在途时按热键命中同一文本不应
+        重显旧译文；重试成功后缓存由新译文重建，失败则由失败
+        路径清空，两种终态下缓存都始终与最后一次结果一致。
         """
-        text = self._pending_text  # 先取：_cancel_workers 会清空
+        # 先取原文：_cancel_workers 会清空 _pending_text
+        text = self._pending_text or self._last_text
         if not text:
             return
         if not self._cancel_workers():
@@ -242,6 +248,7 @@ class BaseHotkeyTranslator(QObject):
                     "上一次翻译仍在结束中，请稍后重试", can_retry=False
                 )
             return
+        self.invalidate_last_text()
         self._begin_translation(text)
 
     def _on_translate_success(self, result: str) -> None:

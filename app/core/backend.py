@@ -6,7 +6,8 @@
 - vLLM / 其他:  自定义 base_url
 
 统一接口：chat_stream()（流式）与 chat()（非流式）。
-支持通过 cancel() 中断进行中的流式请求，同时保持连接池复用。
+支持通过 cancel() 中断进行中的流式请求（取消会关闭连接池，
+下次请求自动重建；正常请求之间连接池复用）。
 """
 
 from __future__ import annotations
@@ -75,10 +76,10 @@ class OpenAIBackend:
         }
 
     def _ensure_client(self) -> httpx.Client:
-        """返回可用的 httpx 客户端；被 close 关闭后自动重建。
+        """返回可用的 httpx 客户端；被 cancel()/close() 关闭后自动重建。
 
-        注意：cancel() 现在只关闭当前请求，不关闭整个 client，
-        因此连接池可以在多次请求间复用，提升性能。
+        正常请求之间连接池复用；cancel() 为打断阻塞在连接建立阶段
+        的请求会关闭 client，下次请求在此重建。
         """
         if self._client.is_closed:
             self._client = httpx.Client(
@@ -216,9 +217,9 @@ class OpenAIBackend:
         return self._cancel_event.wait(seconds)
 
     def cancel(self) -> None:
-        """中断进行中的流式请求，同时保持连接池可复用。
+        """中断进行中的流式请求。
 
-        采用两步策略：
+        三步策略：
         1. 设置取消事件：通知正在读取响应的线程退出
         2. 关闭响应对象（若已创建）：打断阻塞的读取
         3. 关闭 client：强制中断阻塞在连接建立或首字节等待的请求

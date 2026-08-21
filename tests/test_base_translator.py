@@ -47,3 +47,37 @@ def test_cancel_workers_clears_pending_text():
     t._pending_text = "hello"
     assert t._cancel_workers() is True
     assert t._pending_text == ""
+
+
+def test_retry_falls_back_to_last_text():
+    """完成/缓存展示态点 ✕ 后 _pending_text 已清空：
+    重试回退从去重缓存取原文，仍能重新请求翻译。"""
+    t = _make()
+    t._pending_text = ""
+    t._last_text = "cached text"
+    t._last_result = "旧译文"
+    calls: list[str] = []
+    t._begin_translation = lambda text: calls.append(text)
+    t._on_retry_requested()
+    assert calls == ["cached text"]
+
+
+def test_retry_clears_dedup_cache():
+    """重试启动前清空去重缓存：重试在途时按热键不得重显旧译文。"""
+    t = _make()
+    t._pending_text = "hello"
+    t._last_text = "hello"
+    t._last_result = "旧译文"
+    t._begin_translation = lambda text: None
+    t._on_retry_requested()
+    assert t._last_text == ""
+    assert t._last_result == ""
+
+
+def test_retry_without_any_text_is_noop():
+    """_pending_text 与去重缓存均为空：点击重试不触发翻译。"""
+    t = _make()
+    calls: list[str] = []
+    t._begin_translation = lambda text: calls.append(text)
+    t._on_retry_requested()
+    assert calls == []

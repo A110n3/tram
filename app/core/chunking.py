@@ -36,13 +36,24 @@ def _join_sentences(a: str, b: str) -> str:
 
 
 def _split_long_paragraph(text: str, max_chars: int) -> list[str]:
-    """把单个超长段落按句子切开。"""
+    """把单个超长段落按句子切开。
+
+    兜底：单句切分后仍超限（整块无任何句读切分点，如日志行/
+    压缩文本）时按长度硬切，保证产出的单元不超过 max_chars，
+    避免单块撑爆模型上下文。
+    """
     parts = []
     buf = ""
     for sentence in _SENTENCE_SPLIT.split(text):
         sentence = sentence.strip()
         if not sentence:
             continue
+        while len(sentence) > max_chars:
+            if buf:  # 先落盘已累积内容，保持原文顺序
+                parts.append(buf)
+                buf = ""
+            parts.append(sentence[:max_chars])
+            sentence = sentence[max_chars:]
         if buf and len(buf) + len(sentence) + 1 > max_chars:
             parts.append(buf)
             buf = sentence
@@ -60,7 +71,8 @@ def split_text(text: str, max_chars: int = 2000) -> list[str]:
       恰好对应一个块。这样译文按 ``\\n\\n`` 拼接时段落边界不会被拆开，
       避免在段落中间引入多余的空行。
     - 单段超长输入（含多段落中夹带的超长段落）：没有段落边界可依托，
-      退而按句子切，避免整块超出上下文上限。
+      退而按句子切，避免整块超出上下文上限；仍超限（无任何句读
+      切分点）时按长度硬切兜底。
     """
     if not text.strip():
         return []

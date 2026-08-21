@@ -12,10 +12,22 @@ def test_empty_text():
 
 
 def test_single_long_word():
-    """无句子边界的超长文本至少返回一个块。"""
+    """无句子边界的超长文本：硬切兜底，块不超限且内容无损。"""
     text = "a" * 5000
     chunks = split_text(text, max_chars=1000)
-    assert len(chunks) >= 1
+    assert len(chunks) == 5
+    assert all(len(c) <= 1000 for c in chunks)
+    assert "".join(chunks) == text
+
+
+def test_unsplittable_mixed_into_paragraphs_still_bounded():
+    """多段落中夹带无切分点超长文本：硬切兜底后所有块不超限。"""
+    text = f"Short.\n\n{'x' * 900}\n\nShort."
+    chunks = split_text(text, max_chars=300)
+    assert all(len(c) <= 300 for c in chunks)
+    assert "".join(chunks).replace("\n\n", "").replace(" ", "") == (
+        "Short." + "x" * 900 + "Short."
+    )
 
 
 def test_max_chars_minimum():

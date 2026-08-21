@@ -292,6 +292,12 @@ class SettingsDialog(QDialog):
             "队列满时丢弃最旧的等待项。调大更少漏句但落后更多，调小更贴近实时。"
         )
 
+        self.monitor_cursor_pause_cb = QCheckBox("鼠标在区域内时暂停识别")
+        self.monitor_cursor_pause_cb.setToolTip(
+            "鼠标位于监控区域内时跳过画面采样：避免光标悬停导致被监控程序渲染的"
+            "控制条/高亮等变化误触发翻译。鼠标移出后自动恢复。"
+        )
+
         ml.addRow("", self.monitor_enabled_cb)
         ml.addRow("全局热键", self.monitor_hotkey_edit)
         ml.addRow("", self._monitor_hotkey_validation)
@@ -301,6 +307,7 @@ class SettingsDialog(QDialog):
         ml.addRow("防抖周期", self.monitor_debounce_spin)
         ml.addRow("历史条数", self.monitor_history_spin)
         ml.addRow("排队条数", self.monitor_queue_spin)
+        ml.addRow("", self.monitor_cursor_pause_cb)
 
         layout.addWidget(mon_gb)
         layout.addStretch()
@@ -405,6 +412,9 @@ class SettingsDialog(QDialog):
         )
         self.monitor_queue_spin.setValue(
             int(mon.get("queue_size", get_default("monitor", "queue_size")))
+        )
+        self.monitor_cursor_pause_cb.setChecked(
+            bool(mon.get("pause_on_cursor", get_default("monitor", "pause_on_cursor")))
         )
         self._validate_monitor_hotkey(None)
 
@@ -521,6 +531,7 @@ class SettingsDialog(QDialog):
             debounce=self.monitor_debounce_spin.value(),
             history_size=self.monitor_history_spin.value(),
             queue_size=self.monitor_queue_spin.value(),
+            pause_on_cursor=self.monitor_cursor_pause_cb.isChecked(),
             min_chars=mon.get("min_chars", get_default("monitor", "min_chars")),
         )
         self.accept()

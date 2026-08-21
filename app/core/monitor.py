@@ -29,7 +29,7 @@ OcrFn = Callable[[Any], list[tuple[str, float]]]
 
 @dataclass
 class MonitorParams:
-    """漏斗各阈值（config monitor 节同名字段为其来源）。"""
+    """漏斗阈值与采集循环开关（config monitor 节同名字段为其来源）。"""
 
     interval_ms: int = 500  # 监控周期
     diff_threshold: float = 0.02  # 帧差比例超过此值视为画面变化
@@ -42,6 +42,9 @@ class MonitorParams:
     diff_width: int = 320
     # 预处理：识别区域高度低于此值时放大
     upscale_height: int = 60
+    # 鼠标位于监控区域内时跳过采样：光标本身不进 GDI 截图，但被监控
+    # 程序响应鼠标渲染的悬停态（控制条/高亮/浮层）会误触发翻译
+    pause_on_cursor: bool = True
 
 
 # ------------------------------------------------------------------ #

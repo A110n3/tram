@@ -2,12 +2,13 @@
 
 直接同步调用 worker.run()（不启动线程、不依赖 Qt 事件循环），
 验证停止语义与信号发射：取消后不得再发请求、不得再 emit 结果信号。
+另含监控鼠标门控的坐标判断（纯函数部分）。
 """
 
 from __future__ import annotations
 
 from app.core.backend import BackendError
-from app.ui.worker import TranslateWorker
+from app.ui.worker import TranslateWorker, _cursor_in_bbox
 
 
 class _StubBackend:
@@ -106,3 +107,26 @@ def test_worker_failure_emits_failed():
     name, msg = events[0]
     assert name == "failed"
     assert "模型不存在" in msg
+
+
+# ------------------------------------------------------------------ #
+#  监控鼠标门控：_cursor_in_bbox（半开区间，物理像素）
+# ------------------------------------------------------------------ #
+_BBOX = (100, 200, 300, 260)
+
+
+def test_cursor_inside_bbox():
+    assert _cursor_in_bbox((100, 200), _BBOX)  # 左上角（含）
+    assert _cursor_in_bbox((299, 259), _BBOX)  # 右下角内侧
+
+
+def test_cursor_on_open_edges_excluded():
+    """右/下边界为开区间：恰好在边上视为在区域外。"""
+    assert not _cursor_in_bbox((300, 230), _BBOX)
+    assert not _cursor_in_bbox((200, 260), _BBOX)
+
+
+def test_cursor_outside_bbox():
+    assert not _cursor_in_bbox((99, 200), _BBOX)  # 左侧外
+    assert not _cursor_in_bbox((100, 199), _BBOX)  # 上方外
+    assert not _cursor_in_bbox((1000, 1000), _BBOX)  # 远处

@@ -138,6 +138,9 @@ class MonitorTranslator(BaseHotkeyTranslator):
             history_size=int(
                 cfg.get("history_size", get_default("monitor", "history_size"))
             ),
+            pause_on_cursor=bool(
+                cfg.get("pause_on_cursor", get_default("monitor", "pause_on_cursor"))
+            ),
             min_chars=int(cfg.get("min_chars", get_default("monitor", "min_chars"))),
         )
         # 每次会话重建排队状态：残留的旧字幕不应带入新会话

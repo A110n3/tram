@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import win32api
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..core.backend import (
@@ -105,6 +106,13 @@ class OCRWorker(QThread):
             self.succeeded.emit(text)
 
 
+def _cursor_in_bbox(cursor_pos: tuple[int, int], bbox: tuple[int, int, int, int]) -> bool:
+    """坐标是否位于监控区域内（半开区间，物理像素坐标系）。"""
+    x, y = cursor_pos
+    x0, y0, x1, y1 = bbox
+    return x0 <= x < x1 and y0 <= y < y1
+
+
 class MonitorWorker(QThread):
     """在 QThread 中执行区域监控循环：PIL 截图 + 漏斗状态机。
 
@@ -112,6 +120,11 @@ class MonitorWorker(QThread):
     周期 = max(interval, 单帧处理耗时)：OCR 慢于间隔时自动降频，
     不排队积压。new_text 信号携带漏斗产出的新文本（未归一化），
     由编排器做有界队列串行翻译。
+
+    鼠标门控：光标位于区域内时跳过本周期采样。GDI 截图本身不含
+    光标，但被监控程序会响应鼠标渲染悬停态（控制条/高亮/浮层），
+    这些像素变化会穿透帧差门控造成误触发；跳过期间不动参考帧，
+    鼠标移出后帧差自然放行恢复识别。
     """
 
     new_text = pyqtSignal(str)
@@ -144,6 +157,13 @@ class MonitorWorker(QThread):
         interval = max(int(self._params.interval_ms), 100) / 1000.0
         try:
             while not self._stop_flag:
+                # 鼠标门控：光标在区域内时跳过本周期（跳过期间不动
+                # 参考帧，鼠标移出后帧差自然放行恢复识别）
+                if self._params.pause_on_cursor and _cursor_in_bbox(
+                    win32api.GetCursorPos(), self._bbox
+                ):
+                    time.sleep(interval)
+                    continue
                 start = time.monotonic()
                 # ImageGrab 返回 RGB；转 BGR 以对齐 cv2/RapidOCR 约定
                 pil_img = ImageGrab.grab(bbox=self._bbox)

@@ -86,6 +86,7 @@ class MonitorConfig:
     debounce: int = 2  # 连续 N 个周期文本稳定才提交翻译（防渐入动画半截识别）
     history_size: int = 5  # 监控小窗保留最近 N 条翻译历史
     queue_size: int = 3  # 翻译忙时允许排队等待的字幕条数（满则丢最旧等待项）
+    pause_on_cursor: bool = True  # 鼠标位于监控区域内时暂停识别（防悬停态误触发）
     min_chars: int = 2  # 识别文本短于此值视为无文字
 
 
@@ -150,6 +151,7 @@ _TYPE_COERCIONS: dict[str, dict[str, type]] = {
         "debounce": int,
         "history_size": int,
         "queue_size": int,
+        "pause_on_cursor": bool,
         "min_chars": int,
     },
 }

@@ -111,7 +111,7 @@ class MonitorWorker(QThread):
     循环完全脱离 GUI 线程（PIL ImageGrab 可在后台线程调用），
     周期 = max(interval, 单帧处理耗时)：OCR 慢于间隔时自动降频，
     不排队积压。new_text 信号携带漏斗产出的新文本（未归一化），
-    由编排器做丢旧保新翻译。
+    由编排器做有界队列串行翻译。
     """
 
     new_text = pyqtSignal(str)

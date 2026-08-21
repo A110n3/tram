@@ -83,7 +83,9 @@ class MonitorConfig:
     interval_ms: int = 500  # 监控周期（毫秒）
     diff_threshold: float = 0.02  # 帧差比例超过此值视为画面变化（0~1）
     similarity_threshold: float = 0.88  # 文本相似度达到此值视为重复，不翻译
+    debounce: int = 2  # 连续 N 个周期文本稳定才提交翻译（防渐入动画半截识别）
     history_size: int = 5  # 监控小窗保留最近 N 条翻译历史
+    queue_size: int = 3  # 翻译忙时允许排队等待的字幕条数（满则丢最旧等待项）
     min_chars: int = 2  # 识别文本短于此值视为无文字
 
 
@@ -145,7 +147,9 @@ _TYPE_COERCIONS: dict[str, dict[str, type]] = {
         "interval_ms": int,
         "diff_threshold": float,
         "similarity_threshold": float,
+        "debounce": int,
         "history_size": int,
+        "queue_size": int,
         "min_chars": int,
     },
 }

@@ -2,17 +2,22 @@
 
 复用 BaseHotkeyTranslator 的热键/后端生命周期骨架，会话流程为：
 热键 -> 冻结截屏 + RegionOverlay 框选 -> MonitorWorker 后台循环
-（截图/帧差/OCR/查重漏斗）-> 丢旧保新提交 TranslateWorker ->
+（截图/帧差/OCR/查重漏斗）-> 有界队列串行提交 TranslateWorker ->
 MonitorWindow 流式展示。
 
-「丢旧保新」：监控期间同一时刻只允许一个翻译请求在途，新字幕到
-来时取消未完成的旧请求、提交新文本（用户只关心最新字幕）。
+「有界队列」：同一时刻只允许一个翻译请求在途（backend 连接不支持
+并发复用）。正在翻译的请求不打断——中途取消会浪费已算掉的部分，
+且取消等待本身占用时间；新字幕进入 FIFO 队列排队，队列满时丢弃
+最旧的等待项（越新越贴近当前画面）。字幕切换持续快于翻译速度时，
+译文最多落后「队列长度 × 单条翻译耗时」，这是本地模型吞吐受限下
+"少丢句"与"低延迟"之间的折中。
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
+from collections import deque
 
 from PyQt6.QtCore import QRect
 from PyQt6.QtGui import QGuiApplication, QPixmap
@@ -33,7 +38,7 @@ MONITOR_HOTKEY_ID = 3
 
 
 class MonitorTranslator(BaseHotkeyTranslator):
-    """管理区域监控全流程：热键 -> 框选 -> 监控漏斗 -> 丢旧保新翻译 -> 小窗。"""
+    """管理区域监控全流程：热键 -> 框选 -> 监控漏斗 -> 有界队列翻译 -> 小窗。"""
 
     section = "monitor"
     service_name = "监控"
@@ -43,6 +48,10 @@ class MonitorTranslator(BaseHotkeyTranslator):
     _overlay: RegionOverlay | None = None
     _monitor_worker: MonitorWorker | None = None
     _window: MonitorWindow | None = None
+    # 翻译排队：在途一条 + 队列等待若干（会话开始时重建，见 _on_region）
+    _queue: deque[str] = deque()
+    _queue_max: int = 1
+    _dropped: int = 0  # 本会话因队列满被丢弃的等待条数（小窗状态栏提示）
 
     # ---------- 热键处理：会话切换 ----------
     def _on_hotkey(self) -> None:
@@ -125,10 +134,17 @@ class MonitorTranslator(BaseHotkeyTranslator):
                     "similarity_threshold", get_default("monitor", "similarity_threshold")
                 )
             ),
+            debounce=int(cfg.get("debounce", get_default("monitor", "debounce"))),
             history_size=int(
                 cfg.get("history_size", get_default("monitor", "history_size"))
             ),
             min_chars=int(cfg.get("min_chars", get_default("monitor", "min_chars"))),
+        )
+        # 每次会话重建排队状态：残留的旧字幕不应带入新会话
+        self._queue = deque()
+        self._dropped = 0
+        self._queue_max = max(
+            int(cfg.get("queue_size", get_default("monitor", "queue_size"))), 1
         )
 
         window = MonitorWindow(history_size=params.history_size)
@@ -155,8 +171,13 @@ class MonitorTranslator(BaseHotkeyTranslator):
         self.stop_session()
 
     def stop_session(self) -> None:
-        """停止监控会话：停监控线程、取消翻译、关窗（热键切换/异常/退出共用）。"""
+        """停止监控会话：停监控线程、取消翻译、清队列、关窗。
+
+        热键切换/异常/退出共用。排队中的字幕随会话作废，不带入
+        下次会话（_on_region 也会重建队列）。
+        """
         self._close_overlay()
+        self._queue.clear()
         w = self._monitor_worker
         self._monitor_worker = None
         if w is not None:
@@ -183,13 +204,28 @@ class MonitorTranslator(BaseHotkeyTranslator):
         """stop 钩子（服务关闭）：同时结束进行中的监控会话。"""
         self.stop_session()
 
-    # ---------- 丢旧保新翻译 ----------
+    # ---------- 有界队列串行翻译 ----------
     def _on_new_text(self, text: str) -> None:
-        """漏斗产出新字幕：取消在途翻译，提交最新文本。"""
-        # 先取消旧请求并等它退出：backend 连接与取消事件不支持并发复用
-        if not self._cancel_workers():
-            logger.warning("旧翻译线程未退出，丢弃本条字幕")
-            return
+        """漏斗产出新字幕：空闲则立即翻译，在途则排队（满则丢最旧）。
+
+        不打断在途翻译：取消会浪费已算掉的部分，短字幕翻完往往比
+        取消重启更快。队列满时丢最旧的等待项——快对话里越新的
+        句子越贴近当前画面，丢旧损失最小。
+        """
+        if self._window is None:
+            return  # 小窗已被用户关闭（会话停止信号在途）
+        if self._worker is not None:
+            if len(self._queue) >= self._queue_max:
+                self._queue.popleft()
+                self._dropped += 1
+                logger.info("翻译队列已满，丢弃最旧等待字幕（累计 %d 条）", self._dropped)
+            self._queue.append(text)
+        else:
+            self._start_translation(text)
+        self._update_status()
+
+    def _start_translation(self, text: str) -> None:
+        """启动一条翻译（调用方保证此刻无在途 worker）。"""
         window = self._window
         if window is None:
             return  # 小窗已被用户关闭（会话停止信号在途）
@@ -201,7 +237,32 @@ class MonitorTranslator(BaseHotkeyTranslator):
         w.succeeded.connect(self._on_translate_success)
         w.failed.connect(self._on_translate_failed)
         track_worker(self, "_worker", w)
+        # 须在 track_worker 之后连接：finished 先触发 forget_worker 清
+        # 引用（队列已空时），_update_status 才能看到 _worker=None，
+        # 状态从「翻译中」回到「监控中」；排队续翻时身份校验不清引用，
+        # 状态正确显示在途的新 worker
+        w.finished.connect(self._update_status)
         w.start()
+
+    def _next_from_queue(self) -> None:
+        """当前翻译结束：取队首继续；backend 不支持并发，必须串行。"""
+        if self._queue:
+            self._start_translation(self._queue.popleft())
+        self._update_status()
+
+    def _update_status(self) -> None:
+        """小窗标题栏状态：翻译进度 + 排队深度 + 累计丢弃条数。"""
+        window = self._window
+        if window is None:
+            return
+        queued = len(self._queue)
+        if self._worker is not None:
+            status = "翻译中" if queued == 0 else f"翻译中（{queued} 条等待）"
+        else:
+            status = "监控中"
+        if self._dropped:
+            status += f" · 已丢弃 {self._dropped} 条"
+        window.show_status(status)
 
     def _on_translate_success(self, result: str) -> None:
         self._last_text = self._pending_text
@@ -209,6 +270,7 @@ class MonitorTranslator(BaseHotkeyTranslator):
         window = self._window
         if window is not None:
             window.set_translation(result)
+        self._next_from_queue()
 
     def _on_translate_failed(self, message: str) -> None:
         self._last_text = ""
@@ -216,3 +278,5 @@ class MonitorTranslator(BaseHotkeyTranslator):
         window = self._window
         if window is not None:
             window.show_error(message)
+        # 单条失败不阻塞队列：继续翻下一条，错误提示会被新翻译覆盖
+        self._next_from_queue()

@@ -269,11 +269,27 @@ class SettingsDialog(QDialog):
             "调高减少漏翻，调低减少重复。"
         )
 
+        self.monitor_debounce_spin = QSpinBox()
+        self.monitor_debounce_spin.setRange(1, 4)
+        self.monitor_debounce_spin.setSuffix(" 周期")
+        self.monitor_debounce_spin.setToolTip(
+            "字幕连续稳定 N 个监控周期才提交翻译。调小响应更快（适合整句出现的字幕），"
+            "调大可过滤渐入渐出动画中途的半截识别。"
+        )
+
         self.monitor_history_spin = QSpinBox()
         self.monitor_history_spin.setRange(1, 20)
         self.monitor_history_spin.setSuffix(" 条")
         self.monitor_history_spin.setToolTip(
             "监控小窗保留最近 N 条翻译历史，同时用于字幕来回闪（A→B→A）的查重。"
+        )
+
+        self.monitor_queue_spin = QSpinBox()
+        self.monitor_queue_spin.setRange(1, 10)
+        self.monitor_queue_spin.setSuffix(" 条")
+        self.monitor_queue_spin.setToolTip(
+            "字幕切换快于翻译速度时，允许排队等待翻译的条数（不打断正在翻译的一条）。"
+            "队列满时丢弃最旧的等待项。调大更少漏句但落后更多，调小更贴近实时。"
         )
 
         ml.addRow("", self.monitor_enabled_cb)
@@ -282,7 +298,9 @@ class SettingsDialog(QDialog):
         ml.addRow("监控间隔", self.monitor_interval_spin)
         ml.addRow("帧差阈值", self.monitor_diff_spin)
         ml.addRow("文本相似度阈值", self.monitor_sim_spin)
+        ml.addRow("防抖周期", self.monitor_debounce_spin)
         ml.addRow("历史条数", self.monitor_history_spin)
+        ml.addRow("排队条数", self.monitor_queue_spin)
 
         layout.addWidget(mon_gb)
         layout.addStretch()
@@ -379,8 +397,14 @@ class SettingsDialog(QDialog):
             )
             * 100.0
         )
+        self.monitor_debounce_spin.setValue(
+            int(mon.get("debounce", get_default("monitor", "debounce")))
+        )
         self.monitor_history_spin.setValue(
             int(mon.get("history_size", get_default("monitor", "history_size")))
+        )
+        self.monitor_queue_spin.setValue(
+            int(mon.get("queue_size", get_default("monitor", "queue_size")))
         )
         self._validate_monitor_hotkey(None)
 
@@ -494,7 +518,9 @@ class SettingsDialog(QDialog):
             interval_ms=round(self.monitor_interval_spin.value() * 1000),
             diff_threshold=self.monitor_diff_spin.value() / 100.0,
             similarity_threshold=self.monitor_sim_spin.value() / 100.0,
+            debounce=self.monitor_debounce_spin.value(),
             history_size=self.monitor_history_spin.value(),
+            queue_size=self.monitor_queue_spin.value(),
             min_chars=mon.get("min_chars", get_default("monitor", "min_chars")),
         )
         self.accept()

@@ -144,7 +144,7 @@ class MainWindow(QMainWindow):
         )
 
         # 一句话描述
-        desc_label = QLabel("离线划词/识图翻译，接入本地大模型")
+        desc_label = QLabel("离线划词/识图翻译、区域实时监控，接入本地大模型")
         desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         desc_label.setStyleSheet(
             "font-size: 14px; color: #c0c4cc; margin-top: 18px;"
@@ -167,6 +167,7 @@ class MainWindow(QMainWindow):
             "系统托盘常驻 — 后台静默运行",
             "多后端切换 — Ollama / LM Studio / vLLM",
             "术语表 — 自定义专有名词映射",
+            "自定义翻译提示词 — 可替换默认提示词模板",
         ]
 
         # 分隔线

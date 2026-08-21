@@ -24,12 +24,15 @@ dev = [
     "respx>=0.21",
     "pyinstaller>=6.0",
 ]
-# OCR 为可选依赖：纯划词用户不被迫装 ~150MB 引擎栈。
+# OCR 与监控为可选依赖：纯划词用户不被迫装 ~150MB 引擎栈。
 # rapidocr 2→3 换过 result.txts API，上界挡 breaking change；
-# onnxruntime 1.24.1 是 cp314 wheel 起点（CI 的 3.12 亦满足）。
+# onnxruntime 1.24.1 是 cp314 wheel 起点（CI 的 3.12 亦满足）；
+# opencv-python 与 numpy 为监控功能帧差法/预处理依赖（rapidocr 亦需要）。
 ocr = [
     "rapidocr>=3.9,<4",
     "onnxruntime>=1.24.1",
+    "opencv-python>=4.8",
+    "numpy>=1.24",
 ]
 
 [project.gui-scripts]

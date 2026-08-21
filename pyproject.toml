@@ -24,10 +24,10 @@ dev = [
     "respx>=0.21",
     "pyinstaller>=6.0",
 ]
-# OCR 与监控为可选依赖：纯划词用户不被迫装 ~150MB 引擎栈。
+# OCR 为可选依赖：纯划词用户不被迫装 ~150MB 引擎栈。
 # rapidocr 2→3 换过 result.txts API，上界挡 breaking change；
 # onnxruntime 1.24.1 是 cp314 wheel 起点（CI 的 3.12 亦满足）；
-# opencv-python 与 numpy 为监控功能帧差法/预处理依赖（rapidocr 亦需要）。
+# opencv-python 与 numpy 为 OCR 图像解码依赖（rapidocr 亦需要）。
 ocr = [
     "rapidocr>=3.9,<4",
     "onnxruntime>=1.24.1",
@@ -68,10 +68,10 @@ warn_unused_configs = true
 ignore_missing_imports = true  # pywin32 等无 stub（PyQt6 6.9+ 已自带类型）
 check_untyped_defs = true
 
-# OCR/监控图像栈不跟随类型检查：图像数组全程按 Any 传递，
+# OCR 图像栈不跟随类型检查：图像数组全程按 Any 传递，
 # 跳过可省去庞大 stub 图的语义检查耗时
 [[tool.mypy.overrides]]
-module = ["rapidocr.*", "numpy", "numpy.*", "cv2", "cv2.*", "PIL", "PIL.*"]
+module = ["rapidocr.*", "numpy", "numpy.*", "cv2", "cv2.*"]
 follow_imports = "skip"
 
 # ---------- pytest ----------

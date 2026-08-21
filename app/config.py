@@ -77,26 +77,11 @@ class OCRConfig:
 
 
 @dataclass
-class MonitorConfig:
-    enabled: bool = False  # 区域实时监控翻译模式开关（热键注册）
-    hotkey: str = "Ctrl+Alt+F4"  # 全局热键：开始/停止监控（首次触发框选区域）
-    interval_ms: int = 500  # 监控周期（毫秒）
-    diff_threshold: float = 0.02  # 帧差比例超过此值视为画面变化（0~1）
-    similarity_threshold: float = 0.88  # 文本相似度达到此值视为重复，不翻译
-    debounce: int = 2  # 连续 N 个周期文本稳定才提交翻译（防渐入动画半截识别）
-    history_size: int = 5  # 监控小窗保留最近 N 条翻译历史
-    queue_size: int = 3  # 翻译忙时允许排队等待的字幕条数（满则丢最旧等待项）
-    pause_on_cursor: bool = True  # 鼠标位于监控区域内时暂停识别（防悬停态误触发）
-    min_chars: int = 2  # 识别文本短于此值视为无文字
-
-
-@dataclass
 class TramConfig:
     backend: BackendConfig = field(default_factory=BackendConfig)
     translation: TranslationConfig = field(default_factory=TranslationConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     ocr: OCRConfig = field(default_factory=OCRConfig)
-    monitor: MonitorConfig = field(default_factory=MonitorConfig)
     glossary: list = field(default_factory=list)  # 运行时注入，不持久化
 
 
@@ -141,17 +126,6 @@ _TYPE_COERCIONS: dict[str, dict[str, type]] = {
     },
     "ocr": {
         "enabled": bool,
-        "min_chars": int,
-    },
-    "monitor": {
-        "enabled": bool,
-        "interval_ms": int,
-        "diff_threshold": float,
-        "similarity_threshold": float,
-        "debounce": int,
-        "history_size": int,
-        "queue_size": int,
-        "pause_on_cursor": bool,
         "min_chars": int,
     },
 }
@@ -219,6 +193,8 @@ def load_config() -> dict:
 
     历史版本的 save_config 曾把运行时键（如 glossary）写进
     config.json，读取时直接忽略这些键，以文件系统中的专用存储为准。
+    已删除功能的残留配置节（如旧版 monitor）同样忽略，下次保存时
+    随整体写回被自然清除。
     """
     cfg: dict = json.loads(json.dumps(DEFAULT_CONFIG))  # 深拷贝默认值
     try:
@@ -228,6 +204,11 @@ def load_config() -> dict:
             if isinstance(stored, dict):
                 for section, values in stored.items():
                     if section in _RUNTIME_ONLY_KEYS:
+                        continue
+                    if section not in DEFAULT_CONFIG:
+                        # 未知节（已删除功能的残留等）：不并入，避免
+                        # 死配置永久滞留 config.json
+                        logger.info("忽略未知配置节 %s", section)
                         continue
                     if isinstance(values, dict):
                         cfg.setdefault(section, {}).update(values)

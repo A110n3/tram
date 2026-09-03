@@ -13,6 +13,7 @@ cancel() 无法触及的窗口期。
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -82,21 +83,36 @@ class TranslateWorker(QThread):
 class OCRWorker(QThread):
     """在 QThread 中执行 RapidOCR 进程内识别。
 
-    QPixmap 非跨线程安全，调用方在主线程先转成 PNG 字节流再传入；
+    支持两种输入：
+    - PNG 字节流（use_ndarray=False）：传统路径，兼容旧调用
+    - BGR ndarray（use_ndarray=True）：mss 截图直接传入，跳过 PNG 编解码，更快
+
     本线程只做 ONNX 推理，无任何 GUI 依赖。
     """
 
     succeeded = pyqtSignal(str)
     failed = pyqtSignal(str)
 
-    def __init__(self, png: bytes, languages: str, parent=None):
+    def __init__(
+        self,
+        data: Any,
+        languages: str,
+        use_ndarray: bool = False,
+        parent=None,
+    ):
         super().__init__(parent)
-        self._png = png
+        self._data = data
         self._languages = languages
+        self._use_ndarray = use_ndarray
 
     def run(self) -> None:
         try:
-            text = ocr_bytes(self._png, self._languages)
+            if self._use_ndarray:
+                from ..core.ocr import ocr_ndarray
+
+                text = ocr_ndarray(self._data, self._languages)
+            else:
+                text = ocr_bytes(self._data, self._languages)
         except Exception as e:  # 引擎未安装/初始化失败/推理异常
             logger.warning("OCR 失败: %s", e, exc_info=True)
             self.failed.emit(str(e))

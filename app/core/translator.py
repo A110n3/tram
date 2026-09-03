@@ -15,7 +15,7 @@ from ..config import get_default
 from .backend import BackendError, OpenAIBackend, StreamCancelled
 from .chunking import split_text
 from .glossary import to_prompt_block
-from .prompts import build_messages
+from .prompts import build_default_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -76,20 +76,36 @@ class Translator:
         on_token: 每个增量 token 回调（含换行）。
         on_retry: 单块翻译重试前回调，用于通知 UI 回滚该块已显示的内容。
         """
+        # 配置本地化：循环外一次性读取，避免每块重复 dict 链式查找 + 默认值回退
         tcfg = self.config.get("translation", {})
+        bcfg = self.config.get("backend", {})
         source_lang = tcfg.get("source_lang", get_default("translation", "source_lang"))
         target_lang = tcfg.get("target_lang", get_default("translation", "target_lang"))
         style = tcfg.get("style", get_default("translation", "style"))
         chunk_chars = tcfg.get("chunk_chars", get_default("translation", "chunk_chars"))
-        # 不支持 system 角色的后端：系统提示词并入 user 消息
-        use_system_role = self.config.get("backend", {}).get(
+        custom_prompt = tcfg.get("custom_prompt", get_default("translation", "custom_prompt"))
+        use_system_role = bcfg.get(
             "use_system_role", get_default("backend", "use_system_role")
         )
+        merge_system = not use_system_role
+        temperature = bcfg.get("temperature", get_default("backend", "temperature"))
+        max_tokens = bcfg.get("max_tokens", get_default("backend", "max_tokens"))
 
+        # 系统提示词（不含 per-chunk context）：循环外预渲染一次，
+        # 多块翻译时复用，避免每块都重新遍历术语表 + 模板 format
         glossary_block = to_prompt_block(self.config.get("glossary", []))
-        custom_prompt = tcfg.get("custom_prompt", get_default("translation", "custom_prompt"))
-        chunks = split_text(text, chunk_chars)
+        if custom_prompt.strip():
+            system_str = custom_prompt.strip()
+        else:
+            system_str = build_default_system_prompt(
+                target_lang=target_lang,
+                source_lang=source_lang,
+                style=style,
+                glossary_block=glossary_block,
+                context_block="",
+            )
 
+        chunks = split_text(text, chunk_chars)
         full_result: list[str] = []
         prev_result: str | None = None  # 前一块译文，用于保持术语/风格一致
 
@@ -98,28 +114,31 @@ class Translator:
             if self._stopped():
                 raise StreamCancelled()
 
-            context_block = ""
+            # 上下文块：仅当有上一块译文时注入，保持术语与风格一致
             if prev_result:
-                # 块头使用英文：部分后端无法处理请求中的非 ASCII 字符
                 context_block = (
                     "Previously translated content for reference (keep terms,"
                     " tone and style consistent; do not retranslate it):\n"
                     f"{prev_result}"
                 )
+                system_with_ctx = f"{system_str}\n{context_block}"
+            else:
+                system_with_ctx = system_str
 
-            messages = build_messages(
-                chunk,
-                target_lang=target_lang,
-                source_lang=source_lang,
-                style=style,
-                glossary_block=glossary_block,
-                context_block=context_block,
-                merge_system=not use_system_role,
-                custom_prompt=custom_prompt,
-            )
+            # 直接构造 messages，复用预渲染的 system_str
+            if merge_system:
+                messages = [
+                    {"role": "user", "content": f"{system_with_ctx}\n\nText to translate:\n{chunk}"}
+                ]
+            else:
+                messages = [
+                    {"role": "system", "content": system_with_ctx},
+                    {"role": "user", "content": f"Text to translate:\n{chunk}"},
+                ]
 
             result = self._translate_chunk(
-                messages, on_token=on_token, on_retry=on_retry
+                messages, temperature, max_tokens,
+                on_token=on_token, on_retry=on_retry
             )
             full_result.append(result)
             prev_result = result
@@ -129,6 +148,8 @@ class Translator:
     def _translate_chunk(
         self,
         messages: list[dict],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         on_token: Callable[[str], None] | None = None,
         on_retry: Callable[[], None] | None = None,
     ) -> str:
@@ -137,10 +158,19 @@ class Translator:
         永久性错误（4xx）立即失败，不重试。
         注意：StreamCancelled 非 BackendError 子类，不会被此处捕获，
         直接穿透到调用方——确保取消时不触发重试、不继续后续块。
+        temperature/max_tokens 优先使用传入值，未传则回退到配置读取
+        （向后兼容，也便于测试直接调用）。
         """
-        bcfg = self.config.get("backend", {})
-        temperature = bcfg.get("temperature", get_default("backend", "temperature"))
-        max_tokens = bcfg.get("max_tokens", get_default("backend", "max_tokens"))
+        if temperature is None or max_tokens is None:
+            bcfg = self.config.get("backend", {})
+            if temperature is None:
+                temperature = bcfg.get(
+                    "temperature", get_default("backend", "temperature")
+                )
+            if max_tokens is None:
+                max_tokens = bcfg.get(
+                    "max_tokens", get_default("backend", "max_tokens")
+                )
 
         last_err: Exception | None = None
         collected: list[str] = []

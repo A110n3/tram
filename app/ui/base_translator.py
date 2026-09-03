@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import ClassVar, cast
 
@@ -43,6 +44,9 @@ class BaseHotkeyTranslator(QObject):
     service_name: ClassVar[str] = ""
     hotkey_id: ClassVar[int] = 1
 
+    # LRU 译文缓存容量：同一翻译器实例内最近 N 条成功翻译的结果
+    _MAX_CACHE_SIZE = 20
+
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
         self._config = config
@@ -50,9 +54,11 @@ class BaseHotkeyTranslator(QObject):
         self._popup: TranslationPopup | None = None
         self._hotkey_thread: GlobalHotkeyThread | None = None
         self._worker: TranslateWorker | None = None
-        self._last_text: str = ""  # 最近一次成功翻译的文本，用于去重
-        self._last_result: str = ""  # 对应的译文，重复触发时直接重显
+        self._last_text: str = ""  # 最近一次成功翻译的文本，用于重试回退
+        self._last_result: str = ""  # 对应的译文
         self._pending_text: str = ""  # 当前正在翻译的文本
+        # LRU 译文缓存：key=原文, value=译文，最近使用在末尾
+        self._text_cache: OrderedDict[str, str] = OrderedDict()
 
     # ---------- 后端 ----------
     def _make_backend(self) -> OpenAIBackend:
@@ -155,7 +161,13 @@ class BaseHotkeyTranslator(QObject):
         self._popup = TranslationPopup(
             auto_hide_ms=sel_cfg.get(
                 "auto_hide_ms", get_default("selection", "auto_hide_ms")
-            )
+            ),
+            opacity=sel_cfg.get(
+                "popup_opacity", get_default("selection", "popup_opacity")
+            ),
+            click_through=sel_cfg.get(
+                "popup_click_through", get_default("selection", "popup_click_through")
+            ),
         )
         # 用户点关闭按钮时真正取消翻译：中断请求、释放被占用的后端
         self._popup.close_requested.connect(self._cancel_workers)
@@ -193,14 +205,20 @@ class BaseHotkeyTranslator(QObject):
     def _try_show_cached(self, stripped: str) -> bool:
         """重复触发同一文本：直接重显缓存译文，返回 True。
 
-        用户可能不小心关掉了浮窗，需要再按热键找回译文；
-        直接展示缓存也省去重复调用后端的等待。
+        优先查 LRU 缓存（容量 _MAX_CACHE_SIZE），命中则重显并把该项
+        移到末尾（更新 LRU 顺序）。用户可能不小心关掉了浮窗，需要
+        再按热键找回译文；直接展示缓存也省去重复调用后端的等待。
         术语表/设置/目标语言变化后缓存已被 invalidate_last_text 清空，
         此处展示的始终是与当前配置匹配的译文。
         """
-        if stripped == self._last_text and self._last_result:
+        cached = self._text_cache.get(stripped)
+        if cached:
+            # 命中：移到末尾（最近使用）
+            self._text_cache.move_to_end(stripped)
+            self._last_text = stripped
+            self._last_result = cached
             if self._popup:
-                self._popup.show_cached(self._last_result)
+                self._popup.show_cached(cached)
             return True
         return False
 
@@ -253,13 +271,25 @@ class BaseHotkeyTranslator(QObject):
 
     def _on_translate_success(self, result: str) -> None:
         # 成功后才记录去重文本与译文缓存
-        self._last_text = self._pending_text
+        text = self._pending_text
+        self._last_text = text
         self._last_result = result
+        # 写入 LRU 缓存：已存在则移到末尾，超容则淘汰最旧
+        if text in self._text_cache:
+            self._text_cache.move_to_end(text)
+        self._text_cache[text] = result
+        if len(self._text_cache) > self._MAX_CACHE_SIZE:
+            self._text_cache.popitem(last=False)
         if self._popup:
             self._popup.set_translation(result)
 
     def _on_translate_failed(self, message: str) -> None:
-        # 失败后清空记录，允许立即重试同一文本
+        # 失败后移除当前文本的缓存，允许立即重试同一文本
+        # （用户看到失败再按热键，期望的是重翻而不是看旧结果）
+        # 其余文本的缓存保留，不影响其他已成功翻译的内容
+        failed_text = self._pending_text
+        if failed_text and failed_text in self._text_cache:
+            del self._text_cache[failed_text]
         self._last_text = ""
         self._last_result = ""
         if self._popup:
@@ -272,13 +302,15 @@ class BaseHotkeyTranslator(QObject):
 
     # ---------- 去重缓存 ----------
     def invalidate_last_text(self) -> None:
-        """清空去重缓存（原文与译文），强制下次重新翻译。
+        """清空所有译文缓存，强制下次重新翻译。
 
         术语表/设置/目标语言变化后，缓存的译文已过时；用户通常
         立刻用同一段文本验证效果，此时必须重新翻译，不能重显旧译文。
+        清空 LRU 缓存 + 最近一条快捷引用。
         """
         self._last_text = ""
         self._last_result = ""
+        self._text_cache.clear()
 
     # ---------- 切换模型 ----------
     def rebuild_backend(self) -> None:

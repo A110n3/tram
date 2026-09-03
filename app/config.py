@@ -66,6 +66,12 @@ class SelectionConfig:
     hotkey: str = "Ctrl+F4"  # 全局热键：触发取词翻译
     min_chars: int = 2  # 选中文本短于此值跳过，避免误触发
     auto_hide_ms: int = 0  # 悬浮窗自动隐藏时间，0=失焦隐藏
+    # 悬浮窗整体不透明度（划词/OCR 共享），有效范围 0.3~1.0，
+    # 低于 0.3 时译文难以阅读，由悬浮窗侧夹紧
+    popup_opacity: float = 1.0
+    # 悬浮窗鼠标穿透：点击穿透浮窗直达底层窗口。穿透模式下
+    # 浮窗不可拖动/复制/关闭，且永不失焦（失焦隐藏退化为超时隐藏）
+    popup_click_through: bool = False
 
 
 @dataclass
@@ -123,6 +129,8 @@ _TYPE_COERCIONS: dict[str, dict[str, type]] = {
         "enabled": bool,
         "min_chars": int,
         "auto_hide_ms": int,
+        "popup_opacity": float,
+        "popup_click_through": bool,
     },
     "ocr": {
         "enabled": bool,

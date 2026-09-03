@@ -137,8 +137,8 @@ def test_ocr_bytes_engine_unavailable(monkeypatch):
 
 def test_ocr_bytes_unsupported_language(fake_engine):
     engine = fake_engine(result=_FakeResult(["x"]))
-    with pytest.raises(ocr.OCRError, match="暂不支持"):
-        ocr.ocr_bytes(b"png", "jpn")  # 校验先于解码与引擎调用
+    with pytest.raises(ocr.OCRError, match="不支持"):
+        ocr.ocr_bytes(b"png", "kor")  # 校验先于解码与引擎调用
     assert engine.calls == []
 
 
@@ -147,10 +147,14 @@ def test_ocr_bytes_unsupported_language(fake_engine):
 # ------------------------------------------------------------------ #
 
 
-@pytest.mark.parametrize("legacy", ["chi_sim+eng", "chi_tra+eng", "eng", "CH"])
-def test_ocr_bytes_accepts_legacy_languages(fake_engine, tiny_png, legacy):
+@pytest.mark.parametrize(
+    "lang",
+    ["chi_sim+eng", "chi_tra+eng", "eng", "CH",
+    "jpn", "japan", "ja", "JPN",
+])
+def test_ocr_bytes_accepts_various_language_codes(fake_engine, tiny_png, lang):
     fake_engine(result=_FakeResult(["ok"]))
-    assert ocr.ocr_bytes(tiny_png, legacy) == "ok"
+    assert ocr.ocr_bytes(tiny_png, lang) == "ok"
 
 
 # ------------------------------------------------------------------ #
@@ -236,3 +240,47 @@ def test_real_ocr_roundtrip():
     assert "Tram" in text, f"OCR 结果: {text!r}"
     assert "Hello" in text, f"OCR 结果: {text!r}"
     assert "离线" in text, f"OCR 结果: {text!r}"
+
+
+@pytest.mark.skipif(
+    not ocr.is_rapidocr_available(),
+    reason="未安装 rapidocr/onnxruntime",
+)
+def test_real_ocr_japanese(tmp_path):
+    """日语识别端到端验证：动态生成日语测试图 → ocr_bytes → 断言识别正确。"""
+    from PIL import Image, ImageDraw, ImageFont
+
+    # 查找可用日语字体（Windows 内置）
+    font_paths = [
+        r"C:\Windows\Fonts\msgothic.ttc",
+        r"C:\Windows\Fonts\meiryo.ttc",
+        r"C:\Windows\Fonts\msmincho.ttc",
+        r"C:\Windows\Fonts\yugothic.ttc",
+    ]
+    font = None
+    for fp in font_paths:
+        if Path(fp).exists():
+            try:
+                font = ImageFont.truetype(fp, 36)
+                break
+            except Exception:
+                continue
+    if font is None:
+        pytest.skip("系统中未找到可渲染日语的字体")
+
+    # 生成清晰的日语测试图
+    text = "吾輩は猫である"
+    bbox = font.getbbox(text)
+    w, h = bbox[2] + 40, bbox[3] + 30
+    img = Image.new("RGB", (w, h), "white")
+    draw = ImageDraw.Draw(img)
+    draw.text((20, 10), text, font=font, fill="black")
+
+    png_path = tmp_path / "jpn_test.png"
+    img.save(png_path)
+
+    result = ocr.ocr_bytes(png_path.read_bytes(), "jpn")
+    # 关键字应能被识别（允许少量误差，但核心词必须命中）
+    assert "猫" in result or "吾輩" in result or "である" in result, (
+        f"日语 OCR 结果: {result!r}"
+    )

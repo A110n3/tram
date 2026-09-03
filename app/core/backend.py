@@ -219,12 +219,14 @@ class OpenAIBackend:
     def cancel(self) -> None:
         """中断进行中的流式请求。
 
-        三步策略：
+        两级策略：
         1. 设置取消事件：通知正在读取响应的线程退出
-        2. 关闭响应对象（若已创建）：打断阻塞的读取
-        3. 关闭 client：强制中断阻塞在连接建立或首字节等待的请求
+        2. 若已有响应对象：关闭响应流打断流式读取（保留连接池）
+        3. 若尚无响应对象（仍在连接建立/等待响应头）：关闭 client 强制打断
 
-        关闭 client 后，下次请求会自动重建连接池。
+        绝大多数取消发生在流式读取阶段（响应头已到达，_current_response 存在），
+        此时只关响应流，连接池得以保留，下次请求无需重建连接。
+        仅在极少数"刚发起请求就取消"的场景才会销毁连接池。
         """
         self._cancel_event.set()
 
@@ -232,16 +234,17 @@ class OpenAIBackend:
             resp = self._current_response
 
         if resp is not None:
+            # 流式读取阶段：关响应流即可打断，保留连接池
             try:
                 resp.close()
             except Exception:
                 logger.debug("关闭响应流时异常", exc_info=True)
-
-        # 始终关闭 client，确保阻塞在连接建立或首字节等待的请求被打断
-        try:
-            self._client.close()
-        except Exception:
-            logger.debug("关闭 client 时异常", exc_info=True)
+        elif not self._client.is_closed:
+            # 连接建立/响应头等待阶段：只能关 client 强制打断
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("关闭 client 时异常", exc_info=True)
 
     def close(self) -> None:
         """关闭底层连接池，释放所有资源。

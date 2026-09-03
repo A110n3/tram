@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
@@ -32,8 +30,6 @@ from ..core.hotkey import HotkeyError, parse_hotkey, test_hotkey_available
 from ..core.prompts import SOURCE_LANGS, TARGET_LANGS, build_default_system_prompt
 from .worker import ListModelsWorker, TestConnectionWorker
 from .worker_util import launch_worker, shutdown_worker
-
-logger = logging.getLogger(__name__)
 
 # 常用本地后端预设
 PRESETS = {
@@ -65,6 +61,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_model_tab(), "模型设置")
         tabs.addTab(self._build_translation_tab(), "翻译设置")
         tabs.addTab(self._build_hotkey_tab(), "热键设置")
+        tabs.addTab(self._build_window_tab(), "窗口设置")
         layout.addWidget(tabs)
 
         # 保存/取消按钮
@@ -230,6 +227,56 @@ class SettingsDialog(QDialog):
 
         return widget
 
+    def _build_window_tab(self) -> QWidget:
+        """构建窗口设置标签页（浮窗外观与交互）。"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # 外观分组
+        appearance_gb = QGroupBox("外观")
+        al = QFormLayout(appearance_gb)
+        al.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.popup_opacity_spin = QDoubleSpinBox()
+        self.popup_opacity_spin.setRange(0.3, 1.0)
+        self.popup_opacity_spin.setSingleStep(0.1)
+        self.popup_opacity_spin.setDecimals(2)
+        self.popup_opacity_spin.setToolTip(
+            "悬浮窗整体不透明度，越低越透明（低于 0.3 文字难以阅读）"
+        )
+
+        al.addRow("浮窗不透明度", self.popup_opacity_spin)
+        layout.addWidget(appearance_gb)
+
+        # 交互分组
+        interact_gb = QGroupBox("交互")
+        il = QFormLayout(interact_gb)
+        il.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.auto_hide_combo = QComboBox()
+        self.auto_hide_combo.addItem("失焦自动隐藏", 0)
+        self.auto_hide_combo.addItem("3 秒", 3000)
+        self.auto_hide_combo.addItem("5 秒", 5000)
+        self.auto_hide_combo.addItem("10 秒", 10_000)
+        self.auto_hide_combo.addItem("30 秒", 30_000)
+        self.auto_hide_combo.addItem("永不自动隐藏", -1)
+        self.auto_hide_combo.setToolTip(
+            "悬浮窗自动隐藏方式：失焦隐藏 / 固定时长后自动隐藏 / 常驻不隐藏"
+        )
+
+        self.popup_click_through_cb = QCheckBox("启用鼠标穿透")
+        self.popup_click_through_cb.setToolTip(
+            "穿透后点击浮窗直达底层窗口，浮窗不可拖动/复制/关闭，\n"
+            "适合游戏/视频等场景做字幕条用；失焦隐藏退化为 10 秒自动隐藏"
+        )
+
+        il.addRow("自动隐藏", self.auto_hide_combo)
+        il.addRow("", self.popup_click_through_cb)
+        layout.addWidget(interact_gb)
+        layout.addStretch()
+
+        return widget
+
     # ---------- 数据 ----------
     def _load_values(self) -> None:
         b = self._config.get("backend", {})
@@ -282,6 +329,28 @@ class SettingsDialog(QDialog):
         )
         # 初始校验当前热键
         self._validate_hotkey(None)
+
+        # 窗口设置
+        self.popup_opacity_spin.setValue(
+            float(sel.get("popup_opacity", get_default("selection", "popup_opacity")))
+        )
+        self.popup_click_through_cb.setChecked(
+            bool(
+                sel.get(
+                    "popup_click_through",
+                    get_default("selection", "popup_click_through"),
+                )
+            )
+        )
+        auto_hide_ms = int(
+            sel.get("auto_hide_ms", get_default("selection", "auto_hide_ms"))
+        )
+        idx = self.auto_hide_combo.findData(auto_hide_ms)
+        if idx < 0:
+            # 配置值不在预设列表中，添加自定义项
+            self.auto_hide_combo.addItem(f"{auto_hide_ms} ms", auto_hide_ms)
+            idx = self.auto_hide_combo.findData(auto_hide_ms)
+        self.auto_hide_combo.setCurrentIndex(idx)
 
         ocr = self._config.get("ocr", {})
         self.ocr_enabled_cb.setChecked(ocr.get("enabled", get_default("ocr", "enabled")))
@@ -376,11 +445,11 @@ class SettingsDialog(QDialog):
             enabled=self.selection_enabled_cb.isChecked(),
             hotkey=hotkey_spec,
             min_chars=self.selection_min_chars_spin.value(),
-            auto_hide_ms=sel.get(
-                "auto_hide_ms", get_default("selection", "auto_hide_ms")
-            ),
+            auto_hide_ms=int(self.auto_hide_combo.currentData()),
+            popup_opacity=self.popup_opacity_spin.value(),
+            popup_click_through=self.popup_click_through_cb.isChecked(),
         )
-        # languages/min_chars 为 v1 预留字段（config.json 手改），保留原值
+        # languages/min_chars 为内部保留字段（config.json 手改），保留原值
         ocr = self._config.setdefault("ocr", {})
         ocr.update(
             enabled=self.ocr_enabled_cb.isChecked(),

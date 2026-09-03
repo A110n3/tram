@@ -33,6 +33,7 @@ ocr = [
     "onnxruntime>=1.24.1",
     "opencv-python>=4.8",
     "numpy>=1.24",
+    "mss>=9",
 ]
 
 [project.gui-scripts]

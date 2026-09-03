@@ -1,8 +1,11 @@
 """OCR 识图翻译编排器。
 
 公共骨架（后端/热键生命周期、去重缓存、翻译管线）见 base_translator；
-本类只保留 OCR 特有流程：热键 -> 截主屏 -> 全屏覆盖层框选 -> 裁剪
+本类只保留 OCR 特有流程：热键 -> mss 截主屏 -> 全屏覆盖层框选 -> 裁剪
 -> OCRWorker 识别 -> 复用公共翻译管线 -> TranslationPopup 展示。
+
+截图使用 mss 库（GDI 后端），直接出 BGR ndarray，跳过 PNG 编解码；
+同时转一份 QPixmap 给覆盖层做背景显示。
 
 翻译管线（loading/流式/错误/缓存重显）与划词翻译完全共用。
 """
@@ -11,12 +14,17 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from typing import Any
 
 from PyQt6.QtCore import QRect
 from PyQt6.QtGui import QGuiApplication, QPixmap
 
 from ..config import get_default
-from ..core.ocr import is_rapidocr_available, pixmap_to_png
+from ..core.ocr import (
+    capture_primary_screen,
+    is_rapidocr_available,
+    ndarray_to_qpixmap,
+)
 from .base_translator import BaseHotkeyTranslator
 from .region_overlay import RegionOverlay
 from .worker import OCRWorker
@@ -35,8 +43,12 @@ class OCRTranslator(BaseHotkeyTranslator):
     service_name = "OCR"
     hotkey_id = OCR_HOTKEY_ID
 
-    # 热键时刻截取的冻结截图：覆盖层背景与裁剪必须使用同一张
-    _screenshot: QPixmap | None = None
+    # 热键时刻截取的冻结截图（BGR ndarray）：裁剪与识别使用
+    _screenshot_bgr: Any = None  # np.ndarray | None
+    # 覆盖层用的 QPixmap（从同一张 ndarray 转换，保证背景与裁剪一致）
+    _screenshot_pixmap: QPixmap | None = None
+    # 主屏 monitor info（物理坐标：left/top/width/height）
+    _monitor_info: dict | None = None
     _overlay: RegionOverlay | None = None
     _ocr_worker: OCRWorker | None = None
 
@@ -63,15 +75,22 @@ class OCRTranslator(BaseHotkeyTranslator):
             return
 
         # 3. 截主屏（必须在覆盖层显示之前，避免把遮罩截进去）
-        screen = QGuiApplication.primaryScreen()
-        if screen is None:
+        #    mss 直接出 BGR ndarray，同时转一份 QPixmap 给覆盖层背景
+        try:
+            bgr, monitor = capture_primary_screen()
+        except Exception as e:
+            logger.warning("OCR 截图失败: %s", e, exc_info=True)
+            self.hotkey_status.emit(False, f"截图失败：{e}")
             return
-        # grabWindow(0) 抓取整个屏幕/桌面窗口；stub 声明为 voidptr，
-        # 运行时传 int 0 即可（PyQt6 标准用法）
-        self._screenshot = screen.grabWindow(0)  # type: ignore[arg-type]
+        self._screenshot_bgr = bgr
+        self._monitor_info = monitor
+        self._screenshot_pixmap = ndarray_to_qpixmap(bgr)
+        if self._screenshot_pixmap.isNull():
+            self.hotkey_status.emit(False, "截图转 QPixmap 失败")
+            return
 
         # 4. 弹全屏选区覆盖层，结果由 _on_region/_close_overlay_slot 接收
-        overlay = RegionOverlay(self._screenshot)
+        overlay = RegionOverlay(self._screenshot_pixmap)
         self._overlay = overlay
         overlay.region_selected.connect(self._on_region)
         overlay.cancelled.connect(self._close_overlay_slot)
@@ -84,7 +103,9 @@ class OCRTranslator(BaseHotkeyTranslator):
         """主动关闭覆盖层（新热键打断 / stop 路径）。"""
         ov = self._overlay
         self._overlay = None
-        self._screenshot = None
+        self._screenshot_bgr = None
+        self._screenshot_pixmap = None
+        self._monitor_info = None
         if ov is None:
             return
         with contextlib.suppress(RuntimeError, TypeError):
@@ -98,7 +119,9 @@ class OCRTranslator(BaseHotkeyTranslator):
     def _close_overlay_slot(self) -> None:
         """覆盖层 cancelled 信号：仅清引用，关闭由覆盖层自行完成。"""
         self._overlay = None
-        self._screenshot = None
+        self._screenshot_bgr = None
+        self._screenshot_pixmap = None
+        self._monitor_info = None
 
     def _on_stopping(self) -> None:
         """stop 钩子：停止时关闭选区覆盖层。"""
@@ -107,29 +130,39 @@ class OCRTranslator(BaseHotkeyTranslator):
     # ---------- 识别 ----------
     def _on_region(self, region: QRect) -> None:
         self._overlay = None  # 覆盖层已自行 close + deleteLater
-        screenshot = self._screenshot
-        self._screenshot = None
-        if screenshot is None or screenshot.isNull():
+        bgr = self._screenshot_bgr
+        monitor = self._monitor_info
+        self._screenshot_bgr = None
+        self._screenshot_pixmap = None
+        self._monitor_info = None
+        if bgr is None or monitor is None:
             return
 
-        # 选区为覆盖层本地逻辑坐标，截图 pixmap 是设备像素，
-        # 裁剪时按 devicePixelRatio 换算（HiDPI 兼容）
-        dpr = screenshot.devicePixelRatio()
-        src = QRect(
-            round(region.x() * dpr),
-            round(region.y() * dpr),
-            round(region.width() * dpr),
-            round(region.height() * dpr),
-        )
-        src = src.intersected(QRect(0, 0, screenshot.width(), screenshot.height()))
-        if src.isEmpty():
+        # 选区是覆盖层的逻辑坐标（逻辑像素），mss 截图是物理像素。
+        # 覆盖层 geometry 与屏幕 geometry 一致，用 devicePixelRatio 换算
+        screen = QGuiApplication.primaryScreen()
+        dpr = screen.devicePixelRatio() if screen else 1.0
+        x = round(region.x() * dpr)
+        y = round(region.y() * dpr)
+        w = round(region.width() * dpr)
+        h = round(region.height() * dpr)
+
+        # 边界裁剪：限制在截图尺寸内
+        img_h, img_w = bgr.shape[:2]
+        x = max(0, min(x, img_w))
+        y = max(0, min(y, img_h))
+        w = max(0, min(w, img_w - x))
+        h = max(0, min(h, img_h - y))
+        if w == 0 or h == 0:
             return
 
-        # QPixmap 非跨线程安全：在主线程完成裁剪 + PNG 编码
+        # 从 ndarray 裁剪 + 放大（小选区），不走 PNG 编解码，速度更快
+        from ..core.ocr import crop_and_upscale
+
         try:
-            png = pixmap_to_png(screenshot.copy(src))
+            cropped = crop_and_upscale(bgr, x, y, w, h)
         except Exception as e:
-            logger.warning("OCR 预处理失败: %s", e, exc_info=True)
+            logger.warning("OCR 裁剪失败: %s", e, exc_info=True)
             return
 
         # 弹窗在框选结束（鼠标释放）后出现，跟随当前光标定位
@@ -139,12 +172,12 @@ class OCRTranslator(BaseHotkeyTranslator):
         languages = self._config.get("ocr", {}).get(
             "languages", get_default("ocr", "languages")
         )
-        w = OCRWorker(png, languages)
-        self._ocr_worker = w
-        w.succeeded.connect(self._on_ocr_ok)
-        w.failed.connect(self._on_ocr_failed)
-        track_worker(self, "_ocr_worker", w)
-        w.start()
+        worker = OCRWorker(cropped, languages, use_ndarray=True)
+        self._ocr_worker = worker
+        worker.succeeded.connect(self._on_ocr_ok)
+        worker.failed.connect(self._on_ocr_failed)
+        track_worker(self, "_ocr_worker", worker)
+        worker.start()
 
     def _on_ocr_ok(self, text: str) -> None:
         self._ocr_worker = None

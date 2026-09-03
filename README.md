@@ -9,7 +9,7 @@
 ## 功能
 
 - **全局热键取词**：选中任意文本，按热键（默认 `Ctrl+F4`），自动获取并翻译
-- **OCR 识图翻译**：按热键（默认 `Ctrl+Shift+F4`）框选屏幕任意区域，内置中英文 OCR 模型识别后翻译（图片、PDF、视频字幕皆可）
+- **OCR 识图翻译**：按热键（默认 `Ctrl+Shift+F4`）框选屏幕任意区域，内置 PP-OCRv6 多语言模型自动识别后翻译（支持中/英/日及欧洲语种，图片、PDF、视频字幕皆可）
 - **流式悬浮窗**：译文边生成边显示，跟随鼠标，失焦自动隐藏，可拖动
 - **系统托盘常驻**：后台静默运行，自动最小化到托盘
 - **多后端切换**：Ollama / LM Studio / vLLM 等任意 OpenAI 兼容 API
@@ -39,7 +39,7 @@ pip install .
 python -m app.main
 ```
 
-OCR 识图翻译为可选功能，引擎栈（rapidocr + onnxruntime，含内置中英文模型，约 150MB）不随主程序安装：
+OCR 识图翻译为可选功能，引擎栈（rapidocr + onnxruntime，含内置多语言模型，约 150MB）不随主程序安装：
 
 ```bash
 pip install ".[ocr]"
@@ -69,8 +69,11 @@ pip install ".[ocr]"
 **翻译设置**（源/目标语言、温度、翻译风格、自定义提示词）、
 **热键设置**（划词/OCR 的启用开关与热键）。
 
-OCR 说明：框选后可用 ESC/右键取消；首次识别需加载模型（数秒），之后秒开；
-未安装 OCR 可选依赖时，按热键无响应，安装命令记录在日志中。
+OCR 说明：
+- 框选后可用 ESC/右键取消；首次识别需加载模型（数秒），之后秒开
+- 基于 PP-OCRv6 多语言模型，自动识别中/英/日及欧洲语种，无需手动切换
+- 截图使用 mss 库（GDI 后端），直接出 ndarray 跳过 PNG 编解码，速度更快
+- 未安装 OCR 可选依赖时，按热键无响应，安装命令记录在日志中
 
 程序启动后无任何弹窗与系统通知，仅托盘图标常驻，后台静默运行；
 热键注册结果、引擎缺失等状态一律写入日志（见下）。
@@ -98,7 +101,7 @@ app/
 │   ├── chunking.py             # 长文本分段
 │   ├── glossary.py             # 术语表 (~/.tram/glossary.json)
 │   ├── hotkey.py               # 全局热键监听 (Win32 RegisterHotKey)
-│   ├── ocr.py                  # RapidOCR 封装（PaddleOCR 模型 ONNX 版）
+│   ├── ocr.py                  # RapidOCR 封装 + mss 截图（PP-OCRv6 多语言模型）
 │   ├── prompts.py              # 翻译提示词模板
 │   ├── selection.py            # 模拟 Ctrl+C 取词 + 剪贴板恢复
 │   └── translator.py           # 翻译编排
@@ -121,8 +124,8 @@ app/
 - [x] 后端配置 + 连接测试
 - [x] 术语表 + 上下文保持
 - [x] 多后端可切换
-- [x] OCR 识图翻译（RapidOCR 内置中英文模型，框选即译）
-- [ ] OCR 更多语言（日/韩等专用模型）
+- [x] OCR 识图翻译（PP-OCRv6 多语言模型，框选即译）
+- [x] OCR 日语支持（PP-OCRv6 multi 原生覆盖）
 - [ ] 文件翻译（txt / markdown / SRT）
 - [ ] 历史记录
 - [ ] 双语导出
